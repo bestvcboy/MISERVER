@@ -1,0 +1,32 @@
+[Unit]
+Description=DGX fleet thermal monitor and purifier guard
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=notify
+User=bestvcboy
+Group=bestvcboy
+WorkingDirectory=/home/bestvcboy/dgx-thermal
+ExecStart=/home/bestvcboy/dgx-thermal/.venv/bin/python /home/bestvcboy/dgx-thermal/service.py --state /home/bestvcboy/dgx-thermal/state
+Restart=always
+RestartSec=3
+WatchdogSec=40
+NotifyAccess=main
+TimeoutStopSec=35
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/bestvcboy/dgx-thermal/state
+RestrictSUIDSGID=true
+MemoryMax=256M
+TasksMax=32
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

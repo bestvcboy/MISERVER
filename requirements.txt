@@ -1,0 +1,2 @@
+aiohttp==3.14.1
+python-miio==0.5.12

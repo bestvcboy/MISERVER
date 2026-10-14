@@ -1,0 +1,682 @@
+{
+  "samples": 61,
+  "first": 1791938109.8652194,
+  "last": 1791938289.8672938,
+  "interval_range": [2.997260332107544,3.003767967224121],
+  "max_cpu": 61.9,
+  "max_gpu": 44,
+  "max_board": 61.9,
+  "max_power": 54.02,
+  "changes_and_final_rows": [
+    {
+      "ts": 1791938172.865676,
+      "snapshot_at": 1791938173.166971,
+      "requested": 15,
+      "fan": {
+        "configured": true,
+        "confirmed": true,
+        "level": 16,
+        "rpm": 2093,
+        "power": "on",
+        "mode": "favorite",
+        "verified_at": 1791938172.3056788,
+        "observed_mono": 226676.123550897,
+        "execution": "matched",
+        "fault": false,
+        "attempts": 0,
+        "error": "",
+        "ambient_c": 29.6,
+        "ambient_source": "purifier:70632677:temp_dec",
+        "ambient_verified_at": 1791938172.3056633
+      },
+      "decision": {
+        "level": 15,
+        "reasons": [
+          "启动证据30s完成，相邻请求15 deadline=226737",
+          "[noise] 192.168.3.180 acpi:0:acpitz stationary T=45.8 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:2:acpitz stationary T=43.3 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:3:acpitz stationary T=43 effective=0.0000C/s pending=None; 同类另 62 项",
+          "[cold] 192.168.3.180 acpi:1:acpitz qualified derivative-only raw=0.0555 soft=0.0500C/s raw_projection=44.464C hard=75C soft_projection=44.300C history=30.0758/30s; [cold] 192.168.3.184 hwmon2:1:asic qualified derivative-only raw=0.1109 soft=0.0500C/s raw_projection=52.328C hard=75C soft_projection=50.500C history=30.0758/30s; [cold] 192.168.3.184 hwmon3:1:asic qualified derivative-only raw=0.1109 soft=0.0500C/s raw_projection=52.328C hard=75C soft_projection=50.500C history=30.0758/30s; 同类另 2 项",
+          "[context] workload coverage=30/30s",
+          "[feedback] requested=16 actual=16 matched=True advancing=True age=0.855394/9s"
+        ],
+        "scenario": "trial_pending",
+        "scenario_detail": "启动证据30s完成，相邻请求15 deadline=226737",
+        "learning_eligible": false,
+        "trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "pending",
+          "observation_elapsed": null,
+          "outcome": null,
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987
+        },
+        "execution_trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "pending",
+          "observation_elapsed": null,
+          "outcome": null,
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987,
+          "original_from": 16,
+          "original_to": 15
+        },
+        "retry_blocked": false,
+        "trend_complete": {
+          "192.168.3.180": true,
+          "192.168.3.181": true,
+          "192.168.3.183": true,
+          "192.168.3.184": true
+        }
+      },
+      "learning": {
+        "mono": 226676.978944987,
+        "healthy": true,
+        "dropped_records": 0
+      },
+      "nodes": [
+        {
+          "host": "192.168.3.180",
+          "online": true,
+          "sampled_at": 1791938172.865676,
+          "source_ts": 1791938172.9676135,
+          "requested_mono": 226676.683601425,
+          "cpu_temp": 45.8,
+          "gpu_temp": 43,
+          "board_temp": 54,
+          "power_w": 46.76,
+          "power_source": "spbm",
+          "cpu_load": 3.2,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.181",
+          "online": true,
+          "sampled_at": 1791938172.865676,
+          "source_ts": 1791938173.0734334,
+          "requested_mono": 226676.683820033,
+          "cpu_temp": 45.8,
+          "gpu_temp": 44,
+          "board_temp": 52,
+          "power_w": 45.6,
+          "power_source": "spbm",
+          "cpu_load": 1,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.183",
+          "online": true,
+          "sampled_at": 1791938172.865676,
+          "source_ts": 1791938173.0225353,
+          "requested_mono": 226676.683875633,
+          "cpu_temp": 43.8,
+          "gpu_temp": 42,
+          "board_temp": 49,
+          "power_w": 46.19,
+          "power_source": "spbm",
+          "cpu_load": 2.6,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.184",
+          "online": true,
+          "sampled_at": 1791938172.865676,
+          "source_ts": 1791938173.044954,
+          "requested_mono": 226676.683912993,
+          "cpu_temp": 44.8,
+          "gpu_temp": 43,
+          "board_temp": 49,
+          "power_w": 43.34,
+          "power_source": "spbm",
+          "cpu_load": 1.2,
+          "gpu_load": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791938280.8664777,
+      "snapshot_at": 1791938281.3110487,
+      "requested": 15,
+      "fan": {
+        "configured": true,
+        "confirmed": true,
+        "level": 15,
+        "rpm": 2043,
+        "power": "on",
+        "mode": "favorite",
+        "verified_at": 1791938280.1841927,
+        "observed_mono": 226784.002070554,
+        "execution": "matched",
+        "fault": false,
+        "attempts": 0,
+        "error": "",
+        "ambient_c": 29.6,
+        "ambient_source": "purifier:70632677:temp_dec",
+        "ambient_verified_at": 1791938280.1841826
+      },
+      "decision": {
+        "level": 15,
+        "reasons": [
+          "release actual=15 safe=24.0619/30s margin=11.000/2C",
+          "[noise] 192.168.3.180 acpi:0:acpitz stationary T=45.8 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:1:acpitz stationary T=42.4 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:2:acpitz stationary T=43.1 effective=0.0000C/s pending=None; 同类另 49 项",
+          "[cold] 192.168.3.181 acpi:1:acpitz qualified derivative-only raw=0.1106 soft=0.0500C/s raw_projection=47.417C hard=75C soft_projection=45.600C history=30.1712/30s; [cold] 192.168.3.181 acpi:2:acpitz qualified derivative-only raw=0.2875 soft=0.1102C/s raw_projection=54.225C hard=75C soft_projection=48.906C history=30.1712/30s; [cold] 192.168.3.181 acpi:4:acpitz qualified derivative-only raw=0.0663 soft=0.0500C/s raw_projection=45.490C hard=75C soft_projection=45.000C history=30.1712/30s; 同类另 7 项",
+          "[warming] 192.168.3.181 acpi:2:acpitz slope=0.1102C/s 已开始升温，暂停试降",
+          "[uncertain] 192.168.3.181 hwmon0:3:temp3 短时升温待确认，保持风力并冻结下降/成功/学习 T=48.1 raw_projection=65.018C robust=0.0486C/s",
+          "[context] workload coverage=30/30s fixed_delta=192.168.3.181 power 2.908/10",
+          "[feedback] requested=15 actual=15 matched=True advancing=True age=1.11914/9s"
+        ],
+        "scenario": "recovery",
+        "scenario_detail": "release actual=15 safe=24.0619/30s margin=11.000/2C",
+        "learning_eligible": false,
+        "trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "recovery_released",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987
+        },
+        "execution_trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "confirmed",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987,
+          "original_from": 16,
+          "original_to": 15
+        },
+        "retry_blocked": false,
+        "trend_complete": {
+          "192.168.3.180": true,
+          "192.168.3.181": true,
+          "192.168.3.183": true,
+          "192.168.3.184": true
+        }
+      },
+      "learning": {
+        "mono": 226785.121207858,
+        "healthy": true,
+        "dropped_records": 0
+      },
+      "nodes": [
+        {
+          "host": "192.168.3.180",
+          "online": true,
+          "sampled_at": 1791938280.8664777,
+          "source_ts": 1791938281.0444248,
+          "requested_mono": 226784.684403229,
+          "cpu_temp": 45.8,
+          "gpu_temp": 43,
+          "board_temp": 54,
+          "power_w": 46.64,
+          "power_source": "spbm",
+          "cpu_load": 2.3,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.181",
+          "online": true,
+          "sampled_at": 1791938280.8664777,
+          "source_ts": 1791938281.0888915,
+          "requested_mono": 226784.684618973,
+          "cpu_temp": 45.8,
+          "gpu_temp": 44,
+          "board_temp": 52,
+          "power_w": 47.88,
+          "power_source": "spbm",
+          "cpu_load": 5.9,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.183",
+          "online": true,
+          "sampled_at": 1791938280.8664777,
+          "source_ts": 1791938281.210072,
+          "requested_mono": 226784.684674109,
+          "cpu_temp": 43.8,
+          "gpu_temp": 42,
+          "board_temp": 49,
+          "power_w": 46.43,
+          "power_source": "spbm",
+          "cpu_load": 0.9,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.184",
+          "online": true,
+          "sampled_at": 1791938280.8664777,
+          "source_ts": 1791938281.201329,
+          "requested_mono": 226784.68470915,
+          "cpu_temp": 44.8,
+          "gpu_temp": 43,
+          "board_temp": 48,
+          "power_w": 47.92,
+          "power_source": "spbm",
+          "cpu_load": 1.2,
+          "gpu_load": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791938283.866763,
+      "snapshot_at": 1791938284.0945976,
+      "requested": 15,
+      "fan": {
+        "configured": true,
+        "confirmed": true,
+        "level": 15,
+        "rpm": 2043,
+        "power": "on",
+        "mode": "favorite",
+        "verified_at": 1791938283.2178233,
+        "observed_mono": 226787.035694566,
+        "execution": "matched",
+        "fault": false,
+        "attempts": 0,
+        "error": "",
+        "ambient_c": 29.6,
+        "ambient_source": "purifier:70632677:temp_dec",
+        "ambient_verified_at": 1791938283.217807
+      },
+      "decision": {
+        "level": 15,
+        "reasons": [
+          "release actual=15 safe=24.0619/30s margin=11.000/2C",
+          "[noise] 192.168.3.180 acpi:0:acpitz stationary T=45.8 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:1:acpitz stationary T=42.4 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:3:acpitz stationary T=42.9 effective=0.0000C/s pending=None; 同类另 47 项",
+          "[cold] 192.168.3.180 acpi:2:acpitz qualified derivative-only raw=0.0507 soft=0.0500C/s raw_projection=45.122C hard=75C soft_projection=45.100C history=32.9581/30s; [cold] 192.168.3.180 hwmon1:1:Composite qualified derivative-only raw=0.0845 soft=0.0500C/s raw_projection=43.386C hard=75C soft_projection=42.350C history=32.9581/30s; [cold] 192.168.3.180 hwmon0:3:temp3 qualified derivative-only raw=0.0592 soft=0.0500C/s raw_projection=45.375C hard=75C soft_projection=45.100C history=32.9581/30s; 同类另 12 项",
+          "[warming] 192.168.3.181 acpi:2:acpitz slope=0.0961C/s 已开始升温，暂停试降; [warming] 192.168.3.181 acpi:4:acpitz slope=0.0515C/s 已开始升温，暂停试降; [warming] 192.168.3.181 hwmon0:3:temp3 slope=0.0738C/s 已开始升温，暂停试降",
+          "[context] workload coverage=30/30s fixed_delta=192.168.3.181 power 3.319/10",
+          "[feedback] requested=15 actual=15 matched=True advancing=True age=0.872427/9s"
+        ],
+        "scenario": "recovery",
+        "scenario_detail": "release actual=15 safe=24.0619/30s margin=11.000/2C",
+        "learning_eligible": false,
+        "trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "recovery_released",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987
+        },
+        "execution_trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "confirmed",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987,
+          "original_from": 16,
+          "original_to": 15
+        },
+        "retry_blocked": false,
+        "trend_complete": {
+          "192.168.3.180": true,
+          "192.168.3.181": true,
+          "192.168.3.183": true,
+          "192.168.3.184": true
+        }
+      },
+      "learning": {
+        "mono": 226787.908121864,
+        "healthy": true,
+        "dropped_records": 0
+      },
+      "nodes": [
+        {
+          "host": "192.168.3.180",
+          "online": true,
+          "sampled_at": 1791938283.866763,
+          "source_ts": 1791938284.0855646,
+          "requested_mono": 226787.684689149,
+          "cpu_temp": 45.8,
+          "gpu_temp": 43,
+          "board_temp": 54,
+          "power_w": 50.23,
+          "power_source": "spbm",
+          "cpu_load": 2,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.181",
+          "online": true,
+          "sampled_at": 1791938283.866763,
+          "source_ts": 1791938284.00942,
+          "requested_mono": 226787.684908301,
+          "cpu_temp": 45.8,
+          "gpu_temp": 44,
+          "board_temp": 52,
+          "power_w": 48.24,
+          "power_source": "spbm",
+          "cpu_load": 4,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.183",
+          "online": true,
+          "sampled_at": 1791938283.866763,
+          "source_ts": 1791938283.9886246,
+          "requested_mono": 226787.684960861,
+          "cpu_temp": 43.8,
+          "gpu_temp": 42,
+          "board_temp": 49,
+          "power_w": 43.13,
+          "power_source": "spbm",
+          "cpu_load": 0.1,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.184",
+          "online": true,
+          "sampled_at": 1791938283.866763,
+          "source_ts": 1791938283.990033,
+          "requested_mono": 226787.684998045,
+          "cpu_temp": 44.8,
+          "gpu_temp": 43,
+          "board_temp": 49,
+          "power_w": 43.09,
+          "power_source": "spbm",
+          "cpu_load": 2.4,
+          "gpu_load": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791938286.8669145,
+      "snapshot_at": 1791938287.2475138,
+      "requested": 15,
+      "fan": {
+        "configured": true,
+        "confirmed": true,
+        "level": 15,
+        "rpm": 2044,
+        "power": "on",
+        "mode": "favorite",
+        "verified_at": 1791938286.2659142,
+        "observed_mono": 226790.08378974,
+        "execution": "matched",
+        "fault": false,
+        "attempts": 0,
+        "error": "",
+        "ambient_c": 29.6,
+        "ambient_source": "purifier:70632677:temp_dec",
+        "ambient_verified_at": 1791938286.2659018
+      },
+      "decision": {
+        "level": 15,
+        "reasons": [
+          "release actual=15 safe=27.2149/30s margin=11.000/2C",
+          "[noise] 192.168.3.180 acpi:0:acpitz stationary T=45.8 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:1:acpitz stationary T=42.7 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:2:acpitz stationary T=43.1 effective=0.0044C/s pending=None; 同类另 48 项",
+          "[warming] 192.168.3.181 acpi:2:acpitz slope=0.0772C/s 已开始升温，暂停试降; [warming] 192.168.3.181 acpi:4:acpitz slope=0.0602C/s 已开始升温，暂停试降; [warming] 192.168.3.181 hwmon0:3:temp3 slope=0.0669C/s 已开始升温，暂停试降; 同类另 1 项",
+          "[cold] 192.168.3.181 acpi:6:acpitz qualified derivative-only raw=0.0772 soft=0.0500C/s raw_projection=47.016C hard=75C soft_projection=46.200C history=30.1172/30s; [cold] 192.168.3.181 hwmon0:7:temp7 qualified derivative-only raw=0.0993 soft=0.0500C/s raw_projection=47.678C hard=75C soft_projection=46.200C history=30.1172/30s; [cold] 192.168.3.183 acpi:4:acpitz qualified derivative-only raw=0.0551 soft=0.0500C/s raw_projection=45.054C hard=75C soft_projection=44.900C history=30.1172/30s; 同类另 2 项",
+          "[context] workload coverage=30/30s fixed_delta=192.168.3.181 power 3.594/10",
+          "[feedback] requested=15 actual=15 matched=True advancing=True age=0.977336/9s"
+        ],
+        "scenario": "recovery",
+        "scenario_detail": "release actual=15 safe=27.2149/30s margin=11.000/2C",
+        "learning_eligible": false,
+        "trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "recovery_released",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987
+        },
+        "execution_trial": {
+          "from": 16,
+          "to": 15,
+          "kind": "release",
+          "status": "confirmed",
+          "observation_elapsed": 0,
+          "outcome": "recovery_released",
+          "deadline": 226736.978944987,
+          "elapsed": 0,
+          "requested_at": 226676.978944987,
+          "original_deadline": 226736.978944987,
+          "destination_requested_at": 226676.978944987,
+          "original_from": 16,
+          "original_to": 15
+        },
+        "retry_blocked": false,
+        "trend_complete": {
+          "192.168.3.180": true,
+          "192.168.3.181": true,
+          "192.168.3.183": true,
+          "192.168.3.184": true
+        }
+      },
+      "learning": {
+        "mono": 226791.061126032,
+        "healthy": true,
+        "dropped_records": 0
+      },
+      "nodes": [
+        {
+          "host": "192.168.3.180",
+          "online": true,
+          "sampled_at": 1791938286.8669145,
+          "source_ts": 1791938286.9635248,
+          "requested_mono": 226790.684838852,
+          "cpu_temp": 45.8,
+          "gpu_temp": 43,
+          "board_temp": 54,
+          "power_w": 46.6,
+          "power_source": "spbm",
+          "cpu_load": 2.6,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.181",
+          "online": true,
+          "sampled_at": 1791938286.8669145,
+          "source_ts": 1791938287.163762,
+          "requested_mono": 226790.685057877,
+          "cpu_temp": 45.8,
+          "gpu_temp": 44,
+          "board_temp": 52,
+          "power_w": 47.79,
+          "power_source": "spbm",
+          "cpu_load": 4.7,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.183",
+          "online": true,
+          "sampled_at": 1791938286.8669145,
+          "source_ts": 1791938286.9752777,
+          "requested_mono": 226790.685116197,
+          "cpu_temp": 43.8,
+          "gpu_temp": 42,
+          "board_temp": 49,
+          "power_w": 44.06,
+          "power_source": "spbm",
+          "cpu_load": 0.1,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.184",
+          "online": true,
+          "sampled_at": 1791938286.8669145,
+          "source_ts": 1791938286.9807684,
+          "requested_mono": 226790.685152725,
+          "cpu_temp": 44.8,
+          "gpu_temp": 43,
+          "board_temp": 48,
+          "power_w": 45.36,
+          "power_source": "spbm",
+          "cpu_load": 2.1,
+          "gpu_load": 0
+        }
+      ]
+    },
+    {
+      "ts": 1791938289.8672938,
+      "snapshot_at": 1791938290.198223,
+      "requested": 14,
+      "fan": {
+        "configured": true,
+        "confirmed": true,
+        "level": 15,
+        "rpm": 2044,
+        "power": "on",
+        "mode": "favorite",
+        "verified_at": 1791938289.2775722,
+        "observed_mono": 226793.095444352,
+        "execution": "matched",
+        "fault": false,
+        "attempts": 0,
+        "error": "",
+        "ambient_c": 29.6,
+        "ambient_source": "purifier:70632677:temp_dec",
+        "ambient_verified_at": 1791938289.2775567
+      },
+      "decision": {
+        "level": 14,
+        "reasons": [
+          "release 15->14 safe=30/30s deadline=226854",
+          "[noise] 192.168.3.180 acpi:0:acpitz stationary T=45.8 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:1:acpitz stationary T=42.5 effective=0.0000C/s pending=None; [noise] 192.168.3.180 acpi:2:acpitz stationary T=42.9 effective=0.0000C/s pending=None; 同类另 53 项",
+          "[warming] 192.168.3.181 acpi:4:acpitz slope=0.0627C/s 已开始升温，暂停试降; [warming] 192.168.3.181 hwmon0:5:temp5 slope=0.0562C/s 已开始升温，暂停试降",
+          "[cold] 192.168.3.181 acpi:6:acpitz qualified derivative-only raw=0.0583 soft=0.0500C/s raw_projection=46.448C hard=75C soft_projection=46.200C history=30.0908/30s; [cold] 192.168.3.181 hwmon0:7:temp7 qualified derivative-only raw=0.0749 soft=0.0500C/s raw_projection=46.947C hard=75C soft_projection=46.200C history=30.0908/30s",
+          "[context] workload coverage=30/30s fixed_delta=192.168.3.181 power 3.780/10",
+          "[feedback] requested=15 actual=15 matched=True advancing=True age=0.91312/9s"
+        ],
+        "scenario": "trial_pending",
+        "scenario_detail": "release 15->14 safe=30/30s deadline=226854",
+        "learning_eligible": false,
+        "trial": {
+          "from": 15,
+          "to": 14,
+          "kind": "release",
+          "status": "pending",
+          "observation_elapsed": null,
+          "outcome": null,
+          "deadline": 226854.008563943,
+          "elapsed": 0,
+          "requested_at": 226794.008563943,
+          "original_deadline": 226854.008563943,
+          "destination_requested_at": 226794.008563943
+        },
+        "execution_trial": {
+          "from": 15,
+          "to": 14,
+          "kind": "release",
+          "status": "pending",
+          "observation_elapsed": null,
+          "outcome": null,
+          "deadline": 226854.008563943,
+          "elapsed": 0,
+          "requested_at": 226794.008563943,
+          "original_deadline": 226854.008563943,
+          "destination_requested_at": 226794.008563943,
+          "original_from": 15,
+          "original_to": 14
+        },
+        "retry_blocked": false,
+        "trend_complete": {
+          "192.168.3.180": true,
+          "192.168.3.181": true,
+          "192.168.3.183": true,
+          "192.168.3.184": true
+        }
+      },
+      "learning": {
+        "mono": 226794.008563943,
+        "healthy": true,
+        "dropped_records": 0
+      },
+      "nodes": [
+        {
+          "host": "192.168.3.180",
+          "online": true,
+          "sampled_at": 1791938289.8672938,
+          "source_ts": 1791938289.9637282,
+          "requested_mono": 226793.685219156,
+          "cpu_temp": 45.8,
+          "gpu_temp": 43,
+          "board_temp": 54,
+          "power_w": 45.7,
+          "power_source": "spbm",
+          "cpu_load": 2.8,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.181",
+          "online": true,
+          "sampled_at": 1791938289.8672938,
+          "source_ts": 1791938290.0989022,
+          "requested_mono": 226793.685443508,
+          "cpu_temp": 45.8,
+          "gpu_temp": 44,
+          "board_temp": 52,
+          "power_w": 47.92,
+          "power_source": "spbm",
+          "cpu_load": 4,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.183",
+          "online": true,
+          "sampled_at": 1791938289.8672938,
+          "source_ts": 1791938289.974936,
+          "requested_mono": 226793.68550002,
+          "cpu_temp": 43.8,
+          "gpu_temp": 42,
+          "board_temp": 49,
+          "power_w": 45.06,
+          "power_source": "spbm",
+          "cpu_load": 0.2,
+          "gpu_load": 0
+        },
+        {
+          "host": "192.168.3.184",
+          "online": true,
+          "sampled_at": 1791938289.8672938,
+          "source_ts": 1791938290.0474226,
+          "requested_mono": 226793.68553442,
+          "cpu_temp": 44.8,
+          "gpu_temp": 43,
+          "board_temp": 49,
+          "power_w": 43.95,
+          "power_source": "spbm",
+          "cpu_load": 1.4,
+          "gpu_load": 0
+        }
+      ]
+    }
+  ]
+}
