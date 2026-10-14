@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+if [ -n "${DGX_CHECK_PYTHON:-}" ]; then
+    checker="$DGX_CHECK_PYTHON"
+elif [ -x .venv-check/Scripts/python.exe ]; then
+    checker=.venv-check/Scripts/python.exe
+elif [ -x .venv-check/bin/python ]; then
+    checker=.venv-check/bin/python
+else
+    printf 'Create .venv-check with Python 3.12 and install requirements.txt before committing.\n' >&2
+    exit 1
+fi
+exec "$checker" -B ops/precommit.py

@@ -1,5 +1,7 @@
 # 使用四台 DGX 温控服务
 
+当前维护、检查和候选状态以 [当前交付工具](ops/README.md) 及 `release_index.json` 为准。运行统一 `check.py`，不要把历史 R3、R5 发布脚本作为新的实机入口。本文中的已部署功能说明不代表本轮实际服务已运行，实际状态须重新观测。
+
 服务目录为 `192.168.3.180` 的 `/home/bestvcboy/dgx-thermal`。打开 [DGX 热控中心](https://192.168.3.180:8910/)。服务复用四台现有平台的 `9100/status`，不另装节点 Agent。上线检查与真实绑定验收是两个独立步骤。
 
 ## 打开管理界面
@@ -143,7 +145,7 @@ journalctl -u dgx-thermal -n 20 --no-pager
 
 ## 更新服务代码
 
-部署文件包含 `core.py learning.py service.py qr_connector.py ui.html ui.css ui.js requirements.txt test_core.py test_learning.py test_learning_service.py test_history_ui.py test_service.py README.md install.sh dgx-thermal.service test_qr_connector.py test_qr_ui.py THIRD_PARTY_NOTICES.md`。更新时保留 TLS 文件、设置、历史、已存凭据和电机预算。先在隔离目录验证，再备份并更新运行代码，不要并行启动两个控制进程。
+当前应用、工具、测试和回放样本的完整清单由 `release_index.json` 提供，不再维护容易遗漏的手写部署文件列表。该清单是离线候选定义，不是原生安装准入。更新时保留 TLS 文件、设置、历史、已存凭据和电机预算。先在隔离目录运行统一检查，再使用新的、独立复核过的发布流程。不能并行启动两个控制进程。
 
 在有现成依赖的隔离环境运行：
 

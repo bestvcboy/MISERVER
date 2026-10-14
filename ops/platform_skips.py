@@ -1,0 +1,26 @@
+POSIX_SKIPS = {'test_startup_evidence.EvidenceTests.test_unsupported_windows_private_creation_is_explicit_refusal'}
+
+WINDOWS_SKIPS = {
+    'test_service.HTTPTests.test_bound_token_restores_in_fresh_app_without_qr_or_network',
+    'test_learning_service.LearningStorageTests.test_real_linux_checkpoint_permissions_sync_and_proof_restore',
+    'test_observer.PurifierTests.test_real_token_mode_600_readonly',
+    'test_service.MotorDurabilityTests.test_blocking_mutation_completion_and_exception_start_full_windows',
+    'test_service.MotorDurabilityTests.test_corrupt_mismatched_duplicate_and_unsafe_budget_remains_read_only',
+    'test_service.MotorDurabilityTests.test_downward_eligibility_rechecked_after_blocking_persistence',
+    'test_service.MotorDurabilityTests.test_exhaustion_100_108_111_survives_restart_and_false_fault_bit',
+    'test_service.MotorDurabilityTests.test_failed_recovery_preserves_exhaustion_even_after_replacement_before_dir_sync',
+    'test_service.MotorDurabilityTests.test_interrupted_reservations_consume_budget_without_any_physical_write',
+    'test_service.MotorDurabilityTests.test_missing_budget_with_token_or_dangling_entries_never_seeds',
+    'test_service.MotorDurabilityTests.test_one_attempt_restart_imposes_full_eight_and_thirty_second_windows',
+    'test_service.MotorDurabilityTests.test_recovery_preserves_one_attempt_and_unknown_expected_debt',
+    'test_service.MotorDurabilityTests.test_recovery_sync_and_compensating_write_failure_never_allow_third_command',
+    'test_service.MotorDurabilityTests.test_reservation_and_directory_sync_failures_issue_no_commands',
+    'test_service.MotorDurabilityTests.test_reservations_and_raised_expected_level_are_durable_before_commands',
+    'test_service.MotorDurabilityTests.test_seed_and_absence_permission_failures_never_grant_fresh_budget',
+    'test_service.MotorDurabilityTests.test_successful_recovery_retains_disk_debt_until_new_reservation',
+    'test_service.MotorDurabilityTests.test_wall_clock_jumps_never_replenish_or_shorten_restart_windows',
+    'test_startup_evidence.NativeFilesystemTests.test_native_descriptor_closed_after_before_leaves_incomplete_prefix',
+    'test_startup_evidence.NativeFilesystemTests.test_native_exclusive_modes_and_collision',
+    'test_startup_evidence.NativeFilesystemTests.test_native_prefix_reader_torn_tail_size_and_symlink',
+    'test_startup_evidence.NativeFilesystemTests.test_native_symlink_and_unsafe_parent_refused',
+}

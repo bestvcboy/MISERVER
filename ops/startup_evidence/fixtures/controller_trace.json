@@ -1,0 +1,448 @@
+{
+  "count": 22,
+  "replay_final_phase": "closed",
+  "replay_scope": "controller-history Timeline only, not original live observer or snapshot guards",
+  "samples_truncated": false,
+  "trace": [
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 50.2,
+      "max_gpu": 48,
+      "max_power": 52.91,
+      "mono": 259916.799382223,
+      "readback": 259916.493848109,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971412.8121953,
+        1791971412.910463,
+        1791971412.9355447,
+        1791971412.9206479
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.9,
+      "max_gpu": 48,
+      "max_power": 47.47,
+      "mono": 259919.774118063,
+      "readback": 259919.525986649,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971415.6745615,
+        1791971415.8916082,
+        1791971415.8509781,
+        1791971415.8301077
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 59,
+      "max_cpu": 49.9,
+      "max_gpu": 48,
+      "max_power": 49,
+      "mono": 259922.690857913,
+      "readback": 259919.525986649,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971418.6735647,
+        1791971418.815916,
+        1791971418.83461,
+        1791971418.8036654
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 59,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 46.89,
+      "mono": 259925.780742444,
+      "readback": 259922.940863454,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971421.6742024,
+        1791971421.8840506,
+        1791971421.9042025,
+        1791971421.9641402
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 47.82,
+      "mono": 259928.652129188,
+      "readback": 259925.970350798,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971424.6726239,
+        1791971424.8323162,
+        1791971424.743756,
+        1791971424.7412279
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 47.84,
+      "mono": 259931.721693714,
+      "readback": 259928.986093305,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971427.6772974,
+        1791971427.7295692,
+        1791971427.8855512,
+        1791971427.8941038
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 48.54,
+      "mono": 259934.786100871,
+      "readback": 259932.030417766,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971430.6857042,
+        1791971430.7249525,
+        1791971430.860446,
+        1791971430.7729962
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 59,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 47.21,
+      "mono": 259937.74011631,
+      "readback": 259935.054087143,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971433.6732066,
+        1791971433.9062166,
+        1791971433.7959719,
+        1791971433.868103
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 59,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 48.81,
+      "mono": 259940.742503614,
+      "readback": 259938.069952331,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971436.763632,
+        1791971436.8660884,
+        1791971436.8860085,
+        1791971436.8133726
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 48.6,
+      "mono": 259943.708220121,
+      "readback": 259941.109755823,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971439.768601,
+        1791971439.8511083,
+        1791971439.8178039,
+        1791971439.8556812
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 47.79,
+      "mono": 259946.758850239,
+      "readback": 259944.614609547,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971442.71771,
+        1791971442.859514,
+        1791971442.9338377,
+        1791971442.9113355
+      ],
+      "thermal_complete": false
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 48.84,
+      "mono": 259949.65127965,
+      "readback": 259947.65044586,
+      "replay_earned": 0,
+      "requested": 16,
+      "sources_advance": [
+        1791971445.6754673,
+        1791971445.7278838,
+        1791971445.7990296,
+        1791971445.8018837
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 48,
+      "max_power": 47.97,
+      "mono": 259952.723757194,
+      "readback": 259950.695841756,
+      "replay_earned": 3.0453958960133605,
+      "requested": 16,
+      "sources_advance": [
+        1791971448.6829705,
+        1791971448.7966204,
+        1791971448.8776412,
+        1791971448.8718722
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 47,
+      "max_power": 48.28,
+      "mono": 259955.777408375,
+      "readback": 259953.71996627,
+      "replay_earned": 6.06952041000477,
+      "requested": 16,
+      "sources_advance": [
+        1791971451.6924326,
+        1791971451.871917,
+        1791971451.9400947,
+        1791971451.9394875
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 47,
+      "max_power": 46,
+      "mono": 259958.663882042,
+      "readback": 259956.738461664,
+      "replay_earned": 9.088015804009046,
+      "requested": 16,
+      "sources_advance": [
+        1791971454.6691897,
+        1791971454.824713,
+        1791971454.8573954,
+        1791971454.8064728
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 47,
+      "max_power": 49.49,
+      "mono": 259961.813123943,
+      "readback": 259959.761837394,
+      "replay_earned": 12.111391534010181,
+      "requested": 16,
+      "sources_advance": [
+        1791971457.685676,
+        1791971457.928682,
+        1791971457.9498696,
+        1791971457.9327512
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 47,
+      "max_power": 48.48,
+      "mono": 259964.680620174,
+      "readback": 259962.785193685,
+      "replay_earned": 15.134747825009981,
+      "requested": 16,
+      "sources_advance": [
+        1791971460.773841,
+        1791971460.8536823,
+        1791971460.8658571,
+        1791971460.7822607
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.8,
+      "max_gpu": 47,
+      "max_power": 48.2,
+      "mono": 259967.77810523,
+      "readback": 259966.222683897,
+      "replay_earned": 18.57223803701345,
+      "requested": 16,
+      "sources_advance": [
+        1791971463.6757586,
+        1791971463.849083,
+        1791971463.9349902,
+        1791971463.9060707
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.6,
+      "max_gpu": 47,
+      "max_power": 48.83,
+      "mono": 259970.719640026,
+      "readback": 259969.241758289,
+      "replay_earned": 21.59131242899457,
+      "requested": 16,
+      "sources_advance": [
+        1791971466.7683072,
+        1791971466.8101273,
+        1791971466.8535597,
+        1791971466.8834183
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.7,
+      "max_gpu": 47,
+      "max_power": 49.11,
+      "mono": 259973.697907405,
+      "readback": 259972.266159608,
+      "replay_earned": 24.615713748004055,
+      "requested": 16,
+      "sources_advance": [
+        1791971469.7638464,
+        1791971469.782874,
+        1791971469.804368,
+        1791971469.8495557
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": true,
+      "execution": "matched",
+      "max_board": 58,
+      "max_cpu": 49.6,
+      "max_gpu": 47,
+      "max_power": 46.83,
+      "mono": 259976.738102203,
+      "readback": 259975.290194259,
+      "replay_earned": 27.639748399000382,
+      "requested": 16,
+      "sources_advance": [
+        1791971472.6755686,
+        1791971472.844304,
+        1791971472.8797061,
+        1791971472.9068637
+      ],
+      "thermal_complete": true
+    },
+    {
+      "actual": 16,
+      "confirmed": false,
+      "execution": "pending",
+      "max_board": 58,
+      "max_cpu": 49.3,
+      "max_gpu": 47,
+      "max_power": 48.11,
+      "mono": 259979.782388126,
+      "readback": 259978.374167045,
+      "replay_earned": 30.723721185000613,
+      "requested": 15,
+      "sources_advance": [
+        1791971475.7654307,
+        1791971475.9184692,
+        1791971475.9217336,
+        1791971475.8939545
+      ],
+      "thermal_complete": true
+    }
+  ]
+}

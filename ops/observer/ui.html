@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DGX · 只读观察</title><link rel="stylesheet" href="/ui.css"><script src="/ui.js" defer></script></head>
+<body><main>
+<header><div><p class="eyebrow">DGX / THERMAL OBSERVER</p><h1>温度与风机 · 只读观察</h1></div><span id="updated">等待遥测</span></header>
+<aside class="banner">控制服务已停止 · 自动与手动调速均未开放 · 请求档位：无<br>
+本页只查询设备，观察历史写入独立目录，不参与控制或学习；读回不代表已执行调速或确认全风。</aside>
+<p id="recording" role="status">等待观察历史写入状态</p>
+<section class="purifier"><h2>净化器读回</h2><p id="purifier">等待查询；SDK 不可用不影响页面与历史。</p></section>
+<section id="nodes" class="nodes" aria-label="四节点传感器"></section>
+<section class="history"><div class="history-head"><div><h2>历史记录</h2><p>保留原始记录时间 · 最新 200 条 · 不代表当前控制或连续采集</p></div>
+<div class="filters"><label>来源<select id="source"><option value="observer">观察历史</option><option value="control">原控制历史（已暂停）</option></select></label><label>范围<select id="hours"><option value="1">1 小时</option><option value="3">3 小时</option><option value="6">6 小时</option><option value="24" selected>24 小时</option></select></label>
+<label>结束时间<input type="datetime-local" id="until" step="1"></label><button id="refresh" type="button">刷新历史</button></div></div>
+<p id="history-message" role="status">等待读取历史</p><div class="table-scroll"><table><thead><tr>
+<th>原始时间</th><th>180 CPU/GPU/非GPU</th><th>181 CPU/GPU/非GPU</th><th>183 CPU/GPU/非GPU</th><th>184 CPU/GPU/非GPU</th>
+<th>历史请求</th><th>历史实际档位</th><th>RPM</th><th>附近环境</th><th>原因</th>
+</tr></thead><tbody id="records"></tbody></table></div></section>
+<footer>无设置、绑定或手动选择入口。附近环境温度来自净化器，未经验证为室温。</footer>
+</main></body></html>

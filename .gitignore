@@ -3,3 +3,7 @@ state/
 .venv/
 __pycache__/
 *.pyc
+.venv-check/
+.audit/
+.gitattributes.tmp
+6

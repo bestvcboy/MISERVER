@@ -1,0 +1,32 @@
+[Unit]
+Description=DGX read-only thermal observer (no control)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=bestvcboy
+Group=bestvcboy
+WorkingDirectory=/home/bestvcboy/dgx-thermal/ops/observer
+ExecStartPre=/home/bestvcboy/dgx-thermal/.venv/bin/python -B /home/bestvcboy/dgx-thermal/ops/observer/observer.py --record-root /home/bestvcboy/dgx-thermal-observer-history --preflight
+ExecStart=/home/bestvcboy/dgx-thermal/.venv/bin/python -B /home/bestvcboy/dgx-thermal/ops/observer/observer.py --state /home/bestvcboy/dgx-thermal/state --record-root /home/bestvcboy/dgx-thermal-observer-history
+Restart=on-failure
+RestartSec=8
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/bestvcboy/dgx-thermal/state
+ReadWritePaths=/home/bestvcboy/dgx-thermal-observer-history
+RestrictSUIDSGID=true
+MemoryMax=256M
+TasksMax=32
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target
