@@ -1,6 +1,10 @@
 POSIX_SKIPS = {'test_startup_evidence.EvidenceTests.test_unsupported_windows_private_creation_is_explicit_refusal'}
 
 WINDOWS_SKIPS = {
+    'test_controller.NativeControllerTests.test_preflight_preserves_faulted_budget_and_refuses_wrong_admission',
+    'test_controller.NativeControllerTests.test_actual_child_timeout_kills_reaps_and_preserves_evidence',
+    'test_controller.NativeControllerTests.test_child_ready_without_heartbeat_expires_and_ignored_term_is_killed',
+    'test_controller.NativeControllerTests.test_foreign_process_real_socket_cannot_forge_child_readiness',
     'test_service.HTTPTests.test_bound_token_restores_in_fresh_app_without_qr_or_network',
     'test_learning_service.LearningStorageTests.test_real_linux_checkpoint_permissions_sync_and_proof_restore',
     'test_observer.PurifierTests.test_real_token_mode_600_readonly',

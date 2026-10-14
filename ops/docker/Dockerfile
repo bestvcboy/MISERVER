@@ -6,4 +6,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs git gcc 
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . /app/
 USER 1000:1000
-ENTRYPOINT ["python", "-B", "/app/ops/observer/observer.py", "--container", "--state", "/home/bestvcboy/dgx-thermal/state", "--record-root", "/home/bestvcboy/dgx-thermal-observer-history"]
+ENTRYPOINT ["python", "-B", "/app/ops/docker/controller_supervisor.py"]

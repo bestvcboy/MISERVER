@@ -998,6 +998,63 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         return next(route.handler for route in self.app.router.routes()
                     if route.method == method and route.resource.canonical == path)
 
+    async def test_status_distinguishes_saved_auto_fresh_control_and_committed_history(self):
+        state = self.app[STATE]
+        state['settings']['manual_level'] = None
+        response = await self.client.get('/api/status', headers=self.headers)
+        status = await response.json()
+        self.assertEqual(status['control_mode'], 'auto')
+        self.assertFalse(status['control_active'])
+        self.assertEqual(status['history_recording']['writes'], 0)
+        state.update(updated_at=time.time(), last_poll=time.monotonic())
+        response = await self.client.get('/api/status', headers=self.headers)
+        status = await response.json()
+        self.assertTrue(status['control_active'])
+        self.assertFalse(status['read_only'])
+        self.assertFalse(status['fan']['confirmed'])
+        self.assertEqual(status['history_recording']['source'], 'control')
+        state['last_poll'] = time.monotonic() - 9
+        response = await self.client.get('/api/status', headers=self.headers)
+        self.assertFalse((await response.json())['control_active'])
+
+    async def test_failed_append_does_not_claim_committed_control_history(self):
+        state = self.app[STATE]
+        with patch('service.aiohttp.ClientSession', OfflineSession), patch.object(state['journal'], 'append', side_effect=OSError('storage')):
+            await self.startup(self.app)
+            deadline = time.monotonic() + 2
+            while not state['history_recording']['failed_writes'] and time.monotonic() < deadline:
+                await asyncio.sleep(.02)
+            self.assertEqual(state['history_recording']['writes'], 0)
+            self.assertEqual(state['history_recording']['failed_writes'], 1)
+            self.assertEqual(state['history_recording']['state'], 'failed')
+            self.assertTrue(state['storage_error'])
+
+    async def test_post_append_failure_preserves_real_committed_history_count(self):
+        state = self.app[STATE]
+        journal = state['journal']
+        appended = False
+        append, size = journal.append, journal.size
+        def raw(row):
+            nonlocal appended
+            append(row)
+            appended = True
+        def measured():
+            if appended:
+                raise OSError('post-append maintenance')
+            return size()
+        with patch('service.aiohttp.ClientSession', OfflineSession), patch.object(journal, 'append', raw), patch.object(journal, 'size', measured):
+            await self.startup(self.app)
+            deadline = time.monotonic() + 2
+            while not state['storage_error'] and time.monotonic() < deadline:
+                await asyncio.sleep(.02)
+            self.assertEqual(state['history_recording']['writes'], 1)
+            self.assertEqual(state['history_recording']['failed_writes'], 0)
+            self.assertEqual(state['history_recording']['state'], 'recording')
+            self.assertIsNone(state['history_recording']['error'])
+            self.assertTrue(state['storage_error'])
+            lines = [line for path in (self.root/'logs').glob('*.jsonl') for line in path.read_text(encoding='utf8').splitlines()]
+            self.assertEqual(len(lines), 1)
+
     async def test_status_current_request_rejects_actual_r2_and_completed_worker_ack(self):
         rows = json.loads(Path(__file__).with_name(
             "test_fan_snapshot_transitions.json").read_text(encoding="utf-8"))["changes_and_final_rows"]

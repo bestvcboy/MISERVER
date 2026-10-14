@@ -42,6 +42,16 @@ TLS 校验保持启用。该命令只发送 GET，不携带账号、token 或控
 
 `ops/startup_evidence` 包含 R6 已验证的失败证据保存。集中版测试继续验证原拒绝帧和尝试累计值能够保留，写入或关闭失败不能报告验收成功。`fixtures/original_verifier.txt` 仅用于离线提取原判据，不能作为原生入口。`phase_replay.py` 验证完整历史与稀疏观察可能出现计时分歧。它不是原实时故障证明。原 30 秒和 6 秒限制保持不变。
 
-`ops/observer` 是尚未安装的观察器候选。它保持自动、手动、配对入口关闭，只发送读取请求。`--record-root` 必须是与正式状态目录不重叠的独立目录。观察历史按 3 秒目标间隔采集、3 天和 64 MiB 保留，有独占写锁。写失败显示错误和累计失败次数。新历史明确标注 `source=observer`、`control_active=false`、`learning_eligible=false`，不能作为控制或学习验收结果。查询 `source=control` 仍只读原历史，不合并成连续控制记录。
+`ops/observer` 保留只读观察能力。独立观察历史明确标注 `source=observer`、`control_active=false`、`learning_eligible=false`，不能作为控制或学习验收结果。观察目录与正式状态不重叠，切换控制服务后仍保留原有观察记录。
 
-候选 systemd 文件只给独立记录目录写权限。当前机器未安装此候选，也未开启新控制试验。原生权限、systemd、TLS、开机启动和实际记录连续性须在相应环境独立核验后才能交付。
+## Docker 自动控制
+
+`ops/docker/compose.yaml` 的控制容器复用当前 `service.py`、完整控制页面、设置 API、控制历史和学习。根文件系统只读，正式状态是控制器唯一的可写业务目录。独立诊断目录保存监督退出证据。准入目录只读，必须包含当前 `release_index.json` 的 SHA256、原状态目录 dev/inode 和 `natural_load_continuous` 授权；准入不接受旧 R3/R5 试验记录。
+
+`controller_supervisor.py --preflight` 只读核验全部源文件、TLS、凭据格式、已保存设置、电机预算、学习检查点及 `Journal.index_ready`。失败不启动控制器、不重置预算、不修复历史。有效的故障预算保留，由现有控制器通过真实匹配读回和可靠持久保存恢复。
+
+监督进程使用私有 Unix socket，只接受实际子进程 PID 的 READY/WATCHDOG 消息。保留原 40 秒健康超时和 35 秒保护退出，Docker 停止宽限为 45 秒。失效时结束当前子进程并保存独立证据。Docker 使用 `unless-stopped` 重启同一准入新版，每次重新预检；不会回到旧代码或检查点。容器或宿主整体冻结不在内部监督器的检测能力内。
+
+发布前必须在确切镜像内运行完整 `check.py --require-native`，并通过独立审查和正式状态只读预检。之后禁用旧 systemd 控制器、停止并排空观察器，检查 8910 已释放及原状态独占锁可用，才启动固定 image ID 的控制容器。历史准入保持 blocked，不能用来启动旧宿主服务。实际运行验证页面文件、进程、独占锁、自动设置、连续控制历史、传感器及真实风机反馈。
+
+保存 `manual_level=null` 表示自动模式。`control_mode` 报告已保存方式，`control_active` 报告控制处理是否新鲜，`fan` 单独报告实际执行结果。`history_recording` 只在原始日志追加完成后递增，学习检查点失败不会撤销已完成的原始记录。自然负载持续控制与压力验收分别报告。

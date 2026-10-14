@@ -1,13 +1,13 @@
 services:
-  thermal-observer:
-    image: dgx-thermal-observer:retro-20261014
-    container_name: dgx-thermal-observer
+  thermal-control:
+    image: dgx-thermal-control:auto-20261015
+    container_name: dgx-thermal-control
     pull_policy: never
     network_mode: host
     user: "1000:1000"
     read_only: true
     restart: unless-stopped
-    stop_grace_period: 35s
+    stop_grace_period: 45s
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 256m
@@ -21,16 +21,15 @@ services:
       - type: bind
         source: /home/bestvcboy/dgx-thermal/state
         target: /home/bestvcboy/dgx-thermal/state
+        bind: {create_host_path: false}
+      - type: bind
+        source: /home/bestvcboy/dgx-thermal-control-admission
+        target: /home/bestvcboy/dgx-thermal-control-admission
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: /home/bestvcboy/dgx-thermal-release-tools
-        target: /home/bestvcboy/dgx-thermal-release-tools
-        read_only: true
-        bind: {create_host_path: false}
-      - type: bind
-        source: /home/bestvcboy/dgx-thermal-observer-history
-        target: /home/bestvcboy/dgx-thermal-observer-history
+        source: /home/bestvcboy/dgx-thermal-control-evidence
+        target: /home/bestvcboy/dgx-thermal-control-evidence
         bind: {create_host_path: false}
     logging:
       driver: json-file

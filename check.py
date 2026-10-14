@@ -23,6 +23,7 @@ SUITES = {
     'startup_evidence': ('ops/startup_evidence', 'test_*.py'),
     'observer': ('ops/observer', 'test_*.py'),
     'delivery': ('ops/tests', 'test_*.py'),
+    'docker_control': ('ops/docker', 'test_*.py'),
 }
 REFERENCES = (
     '.audit/startup-r5-ops/admission_reader.py',

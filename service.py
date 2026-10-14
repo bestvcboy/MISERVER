@@ -380,7 +380,9 @@ async def create_app(root, origins=None):
              "history_disk": ThreadPoolExecutor(max_workers=1),
              "root": root, "force_max": False, "last_identity": 0,
              "motor_schedule": motor_schedule, "settings_revision": 0,
-             "learning": {}, "learning_wall": None, "learning_mono": None}
+             "learning": {}, "learning_wall": None, "learning_mono": None,
+             "history_recording": {"source": "control", "state": "starting", "writes": 0,
+                 "failed_writes": 0, "last_timestamp": None, "error": None}}
     learning = Learning(HOSTS)
     learning_root = root / "learning"
     learning_path = learning_root / "checkpoint.json"
@@ -570,6 +572,9 @@ async def create_app(root, origins=None):
         return web.json_response({key: state[key] for key in ("nodes", "decision", "fan", "settings",
             "storage_error", "settings_error", "dropped_records", "log_bytes", "updated_at")} | {
                 "requested_level": requested_level, "settings_pending": state["settings_task"] is not None,
+                "read_only": False, "control_mode": "auto" if state["settings"]["manual_level"] is None else "manual",
+                "control_active": not state["stop"] and state["updated_at"] is not None and time.monotonic() - state["last_poll"] < 8,
+                "history_recording": dict(state["history_recording"]),
                 "fan": current_fan(requested_level),
                 "learning": dict(state["learning"], active=active_power(state["nodes"], time.monotonic(), time.time())),
                 "server_time": time.time(), "period_seconds": 3,
@@ -772,6 +777,8 @@ async def create_app(root, origins=None):
                                    budget - encoded - Journal.SEGMENT_BYTES - learning_reserve(config))
             try:
                 state["journal"].append(row)
+                state["history_recording"].update(state="recording",
+                    writes=state["history_recording"]["writes"] + 1, last_timestamp=row["ts"], error=None)
             except Exception:
                 learning.loss["raw_append"] += 1
                 learning.eligibility.update(phase="blocked", reason="gap", since=None)
@@ -800,6 +807,7 @@ async def create_app(root, origins=None):
                 row = await asyncio.wait_for(state["queue"].get(), timeout=1)
             except asyncio.TimeoutError:
                 continue
+            writes_before = state["history_recording"]["writes"]
             try:
                 config, revision = dict(state["settings"]), state["settings_revision"]
                 size, cached = await disk_call(write, row, config)
@@ -814,6 +822,10 @@ async def create_app(root, origins=None):
             except Exception:
                 state["dropped_records"] += 1
                 state["storage_error"] = "日志写入失败，全风保护。检查磁盘空间和权限。"
+                if state["history_recording"]["writes"] == writes_before:
+                    state["history_recording"].update(state="failed",
+                        failed_writes=state["history_recording"]["failed_writes"] + 1,
+                        error=state["storage_error"])
                 protect()
             finally:
                 state["queue"].task_done()

@@ -27,6 +27,8 @@
 !ops/docker/Dockerfile
 !ops/docker/Dockerfile.dockerignore
 !ops/docker/compose.yaml
+!ops/docker/controller_supervisor.py
+!ops/docker/test_controller.py
 !ops/observer/dgx-thermal-observer-candidate.service
 !ops/observer/history.py
 !ops/observer/observer.py
@@ -50,7 +52,6 @@
 !ops/startup_evidence/verify-graded-cooling-live.py
 !ops/tests/test_delivery.py
 !qr_connector.py
-!release_index.json
 !requirements.txt
 !service.py
 !test_background_probe.py
@@ -80,3 +81,4 @@
 !ui.css
 !ui.html
 !ui.js
+!release_index.json
