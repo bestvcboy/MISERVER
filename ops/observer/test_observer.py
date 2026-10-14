@@ -23,6 +23,19 @@ HERE = Path(__file__).parent
 
 
 class HistoryFreshnessTests(unittest.TestCase):
+    def test_container_admission_checks_gate_and_identity_without_host_systemctl(self):
+        with patch.object(observer, '_regular_bytes', return_value=b'{"state":"blocked"}'), \
+                patch.object(observer.Path, 'is_file', return_value=True), \
+                patch.object(observer.subprocess, 'run', side_effect=AssertionError('host systemctl in container')):
+            observer._preflight(container=True)
+        with patch.object(observer, '_regular_bytes', return_value=b'{"state":"blocked"}'), \
+                patch.object(observer.Path, 'is_file', return_value=False):
+            with self.assertRaises(ValueError):
+                observer._preflight(container=True)
+        with patch.object(observer, '_regular_bytes', return_value=b'{"state":"permitted"}'):
+            with self.assertRaises(ValueError):
+                observer._preflight(container=True)
+
     def test_recorded_freshness_and_age_survive_projection(self):
         node = dict(host='192.168.3.180', online=True, fresh=False, source_ts=1,
                     reception_age_seconds=0, source_age_seconds=99, received_at=100,

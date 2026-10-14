@@ -1,0 +1,37 @@
+services:
+  thermal-observer:
+    image: dgx-thermal-observer:retro-20261014
+    container_name: dgx-thermal-observer
+    pull_policy: never
+    network_mode: host
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 35s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 32
+    cpus: 0.5
+    ulimits:
+      core: {soft: 0, hard: 0}
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: /home/bestvcboy/dgx-thermal/state
+        target: /home/bestvcboy/dgx-thermal/state
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /home/bestvcboy/dgx-thermal-release-tools
+        target: /home/bestvcboy/dgx-thermal-release-tools
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /home/bestvcboy/dgx-thermal-observer-history
+        target: /home/bestvcboy/dgx-thermal-observer-history
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}

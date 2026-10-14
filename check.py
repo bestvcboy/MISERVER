@@ -42,6 +42,7 @@ ROOT_NAMES = ('AGENTS.md', 'README.md', 'THIRD_PARTY_NOTICES.md', 'requirements.
               'install.sh', 'dgx-thermal.service', 'ui.html', 'ui.js', 'ui.css',
               'test_fan_snapshot_transitions.json', '.gitignore', '.gitattributes',
               '.githooks/pre-commit', '.github/workflows/check.yml')
+ROOT_NAMES += ('ops/docker/Dockerfile', 'ops/docker/compose.yaml', 'ops/docker/Dockerfile.dockerignore')
 EXTENSIONS = {'.py', '.cjs', '.js', '.css', '.html', '.service', '.json', '.txt', '.md'}
 
 

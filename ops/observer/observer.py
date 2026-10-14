@@ -378,10 +378,14 @@ def _consume_exception(future):
         future.exception()
 
 
-def _preflight():
+def _preflight(container=False):
     gate = json.loads(_regular_bytes('/home/bestvcboy/dgx-thermal-release-tools/admission.json', 65536))
     if not isinstance(gate, dict) or gate.get('state') != 'blocked':
         raise ValueError('控制准入必须保持 blocked')
+    if container:
+        if not Path('/.dockerenv').is_file():
+            raise ValueError('容器模式必须在 Docker 内运行')
+        return
     result = subprocess.run(['/usr/bin/systemctl', 'show', 'dgx-thermal.service',
                              '--property=MainPID', '--property=ActiveState'],
                             check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=2)
@@ -395,15 +399,16 @@ def main():
     parser.add_argument('--state', type=Path, default=Path('/home/bestvcboy/dgx-thermal/state'))
     parser.add_argument('--record-root', type=Path, required=True)
     parser.add_argument('--preflight', action='store_true')
+    parser.add_argument('--container', action='store_true')
     args = parser.parse_args()
     validate_record_root(args.state, args.record_root)
     if args.preflight:
-        _preflight()
+        _preflight(args.container)
         return
     import fcntl
     state_fd = os.open(str(args.state), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     fcntl.flock(state_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-    _preflight()
+    _preflight(args.container)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(str(args.state / 'tls.crt'), str(args.state / 'tls.key'))
