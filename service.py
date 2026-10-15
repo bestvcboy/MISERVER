@@ -210,7 +210,7 @@ class MotorSchedule:
                 schedule.attempts, schedule.expected_level = record["attempts"], record["expected_level"]
                 schedule.fault = record["fault"] or schedule.attempts == 2
                 if schedule.fault and schedule.attempts < 2:
-                    schedule.persistence_error = "执行预算处于持久只读故障，需有效全风读回及可靠保存恢复"
+                    schedule.persistence_error = "执行预算处于持久只读故障，需当前授权安全上限的有效读回及可靠保存恢复"
         except (OSError, ValueError, UnicodeError, RecursionError):
             schedule.attempts, schedule.fault = 2, True
             schedule.persistence_error = "执行预算缺失、损坏或不安全，保持只读；仅当前授权安全上限的有效读回及可靠保存可恢复"
@@ -531,7 +531,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
     origins = set(origins or ("https://192.168.3.180:8910", "https://127.0.0.1:8910", "https://localhost:8910"))
     hosts = {urlsplit(origin).netloc for origin in origins}
     motor_schedule = await asyncio.to_thread(MotorSchedule.load, root / "motor-budget.json", root / "device-token")
-    state = {"settings": settings, "nodes": [], "decision": {"level": MAX_LEVEL, "reasons": ["启动全风保护"]},
+    state = {"settings": settings, "nodes": [], "decision": {"level": MAX_LEVEL, "reasons": ["启动保护风力请求"]},
              "fan": {"configured": False, "confirmed": False, "level": None, "rpm": None,
                      "fault": motor_schedule.fault, "attempts": motor_schedule.attempts,
                      "error": motor_schedule.persistence_error or "尚未绑定本地执行凭据，无法执行风力控制"}, "storage_error": "",
@@ -597,7 +597,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
     app = web.Application(middlewares=[protection], client_max_size=8192)
     app[STATE] = state
 
-    def protect(reason="服务或执行条件异常，重新建立全风保护基线"):
+    def protect(reason="服务或执行条件异常，重新建立保护风力基线"):
         decision = state["controller"].protect(reason, time.monotonic())
         state["decision"].update(decision)
         state["fan_request"] = FanRequest(state["controller"].effective_limit(time.monotonic()), protected=True,
@@ -851,7 +851,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                             actual = settings_from_disk(json.loads(settings_path.read_text()))
                         except Exception:
                             actual = None
-                        return actual, "设置保存结果未可靠确认，保持全风；请刷新状态后重新保存", "", None, None
+                        return actual, "设置保存结果未可靠确认，请求保护风力并遵守当前上限；请刷新状态后重新保存", "", None, None
                     try:
                         if learning_enabled:
                             load_learning(state["settings"])
@@ -1008,7 +1008,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     state["queue"].put_nowait(row)
                 except asyncio.QueueFull:
                     state["dropped_records"] += 1
-                    state["storage_error"] = "磁盘写入滞后，采样记录丢失，全风保护"
+                    state["storage_error"] = "磁盘写入滞后，采样记录丢失，保护风力请求"
                     protect()
                 deadline += 3
                 if deadline < now:
@@ -1077,7 +1077,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     state["learning"] = dict(cached, settings_revision=-1)
             except Exception:
                 state["dropped_records"] += 1
-                state["storage_error"] = "日志写入失败，全风保护。检查磁盘空间和权限。"
+                state["storage_error"] = "日志写入失败，保护风力请求。检查磁盘空间和权限。"
                 if state["history_recording"]["writes"] == writes_before:
                     state["history_recording"].update(state="failed",
                         failed_writes=state["history_recording"]["failed_writes"] + 1,
@@ -1099,7 +1099,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 if fan_healthy() and readback_episode.published.failures == 0:
                     readback_episode.accept(state["fan"], time.monotonic(), state["decision"]["level"], eligible=eligible)
                 if not fan_healthy() and readback_hold(time.monotonic()) is None:
-                    protect("风机反馈中断，重新建立全风保护基线")
+                    protect("风机反馈中断，重新建立保护风力基线")
                 try:
                     if state["device"] is None and token_path.exists():
                         state["device"] = await asyncio.to_thread(device_from_token, token_path.read_text().strip())
@@ -1126,7 +1126,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     state["fan"] = {"configured": token_path.exists(), "confirmed": False,
                                     "level": None, "rpm": None, "fault": state["motor_schedule"].fault,
                                     "attempts": state["motor_schedule"].attempts,
-                                    "error": state["motor_schedule"].persistence_error or "净化器不可达、身份验证失败或读回不一致，全风尚未确认"}
+                                    "error": state["motor_schedule"].persistence_error or "净化器连接、身份验证或读回检查未完成，保护风力请求尚未匹配确认"}
                 state["last_fan"] = time.monotonic()
                 if not fan_healthy() and readback_hold(time.monotonic()) is None:
                     protect()

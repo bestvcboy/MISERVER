@@ -117,7 +117,7 @@ class ControlTests(unittest.TestCase):
                 controller.level = 0
                 decision = self.decide(controller, self.sensor_fleet(now + 3, ()), now + 3, minimum_level=0)
                 self.assertEqual(decision["level"], 16)
-                self.assertIn("传感器消失，全风保护", " ".join(decision["reasons"]))
+                self.assertIn("传感器消失，保护风力请求", " ".join(decision["reasons"]))
 
     def test_every_critical_group_and_mixed_wifi_loss_still_force_full_wind(self):
         readings = (("wifi", 50), ("cpu", 45), ("nvme", 40), ("nic", 40), ("other", 40))
@@ -137,7 +137,7 @@ class ControlTests(unittest.TestCase):
                                 if sensor["group"] != group and not (mixed and sensor["group"] == "wifi")]
                         decision = self.decide(controller, fleet, now, minimum_level=0)
                         self.assertEqual(decision["level"], 16 if now else 10)
-                    self.assertIn("传感器消失，全风保护", " ".join(decision["reasons"]))
+                    self.assertIn("传感器消失，保护风力请求", " ".join(decision["reasons"]))
 
     def test_hot_wifi_reappearance_refreshes_observation_and_keeps_full_guard(self):
         controller = self.holding()
@@ -154,7 +154,7 @@ class ControlTests(unittest.TestCase):
         controller.level = 0
         decision = self.decide(controller, self.sensor_fleet(9, ()), 9, minimum_level=0)
         self.assertEqual(decision["level"], 16)
-        self.assertIn("传感器消失，全风保护", " ".join(decision["reasons"]))
+        self.assertIn("传感器消失，保护风力请求", " ".join(decision["reasons"]))
 
     def test_present_normalized_wifi_keeps_thermal_branches(self):
         for readings, expected in (([(0, 63)], 10), ([(0, 63.000001)], 10),
@@ -183,7 +183,7 @@ class ControlTests(unittest.TestCase):
                 controller.level = 0
                 decision = self.decide(controller, self.sensor_fleet(6, ()), 6, minimum_level=0)
                 self.assertEqual(decision["level"], 16)
-                self.assertIn("传感器消失，全风保护", " ".join(decision["reasons"]))
+                self.assertIn("传感器消失，保护风力请求", " ".join(decision["reasons"]))
 
     def test_safe_wifi_gap_does_not_bypass_other_guards(self):
         for fault in ("throttle", "ambiguous", "source", "gap", "power", "learned_power",

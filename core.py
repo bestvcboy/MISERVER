@@ -547,7 +547,7 @@ class Controller:
             self.cool_since = None
             self.history.clear()
             self.positive_since.clear()
-            reasons.append(f"[fault] 采样间隔异常 elapsed={evaluation_elapsed:g}，要求 0<dt<=6s，重新建立全风保护基线")
+            reasons.append(f"[fault] 采样间隔异常 elapsed={evaluation_elapsed:g}，要求 0<dt<=6s，重新建立保护风力基线")
             demand, quiet = MAX_LEVEL, False
             telemetry_fault = True
         self.last_evaluation = now
@@ -558,7 +558,7 @@ class Controller:
         if len(present) != len(nodes):
             self._policy["high_wind_samples"].clear()
         if {n["host"] for n in nodes} != self.hosts or len(nodes) != len(self.hosts):
-            reasons.append(f"[fault] 节点缺失 expected={sorted(self.hosts)} actual={[n['host'] for n in nodes]}，全风保护")
+            reasons.append(f"[fault] 节点缺失 expected={sorted(self.hosts)} actual={[n['host'] for n in nodes]}，保护风力请求")
             demand, quiet = MAX_LEVEL, False
             telemetry_fault = True
         node_records = self._policy["node_transport"]
@@ -579,7 +579,7 @@ class Controller:
                     reasons.append(f"[communication] {host} 节点通信中断，实际温度未知，暂停降档")
                     continue
                 node_records.pop(host, None)
-                reasons.append(f"[fault] {host} 温度缺失或过期 age={now - node.get('requested_mono', -math.inf):g}/6s，全风保护")
+                reasons.append(f"[fault] {host} 温度缺失或过期 age={now - node.get('requested_mono', -math.inf):g}/6s，保护风力请求")
                 demand, quiet = MAX_LEVEL, False
                 telemetry_fault = True
                 self.history.pop(host, None)
@@ -593,7 +593,7 @@ class Controller:
             if not -2 <= source_age <= 6:
                 self._policy["high_wind_samples"].pop(host, None)
                 node_records.pop(host, None)
-                reasons.append(f"[fault] {host} 来源温度时间过期或超前 age={source_age:g}s，允许-2..6s，全风保护")
+                reasons.append(f"[fault] {host} 来源温度时间过期或超前 age={source_age:g}s，允许-2..6s，保护风力请求")
                 demand, quiet, telemetry_fault = MAX_LEVEL, False, True
                 self.history.pop(host, None)
                 self.positive_since.pop(host, None)
@@ -601,7 +601,7 @@ class Controller:
             if source_ts is None or source_ts <= self.sources.get(host, -math.inf):
                 self._policy["high_wind_samples"].pop(host, None)
                 node_records.pop(host, None)
-                reasons.append(f"[fault] {host} 采集时间未推进 source={source_ts} previous={self.sources.get(host)}，全风保护")
+                reasons.append(f"[fault] {host} 采集时间未推进 source={source_ts} previous={self.sources.get(host)}，保护风力请求")
                 demand, quiet = MAX_LEVEL, False
                 telemetry_fault = True
                 self.history.pop(host, None)
@@ -617,7 +617,7 @@ class Controller:
                 node_records.pop(host, None)
                 if record.get("interrupted"):
                     telemetry_fault, demand = True, MAX_LEVEL
-                    reasons.append(f"[fault] {host} 节点或传感器身份改变，全风保护")
+                    reasons.append(f"[fault] {host} 节点或传感器身份改变，保护风力请求")
             samples = self._policy["high_wind_samples"]
             previous_identity, sensor_samples = samples.get(host, (None, {}))
             if identity != previous_identity or node.get("ambiguous_sensors"):
@@ -637,7 +637,7 @@ class Controller:
             credible = [s for s in node["sensors"] if s["calibrated"]]
             if node.get("thermal_throttle") or node.get("ambiguous_sensors"):
                 node_records.pop(host, None)
-                reasons.append(f"[fault] {host} 热节流或传感器身份不明确 throttle={node.get('thermal_throttle')} ambiguous={node.get('ambiguous_sensors')}，全风保护")
+                reasons.append(f"[fault] {host} 热节流或传感器身份不明确 throttle={node.get('thermal_throttle')} ambiguous={node.get('ambiguous_sensors')}，保护风力请求")
                 demand, quiet = MAX_LEVEL, False
                 thermal_risk = thermal_risk or bool(node.get("thermal_throttle"))
                 telemetry_fault = telemetry_fault or bool(node.get("ambiguous_sensors"))
@@ -655,7 +655,7 @@ class Controller:
                     reasons.insert(0, f"[wifi] {host} {identity.rsplit('/', 1)[-1]} Wi-Fi 温度短暂缺失 age={now - observation['seen_at']:g}/30s，保留连续性，冻结下降/成功")
                     wifi_gap = True
                 else:
-                    reasons.append(f"[fault] {host} 传感器消失，全风保护 sensor={identity.rsplit('/', 1)[-1]} age={age:g}/30s last_guard_safe={observation['guard_safe']}")
+                    reasons.append(f"[fault] {host} 传感器消失，保护风力请求 sensor={identity.rsplit('/', 1)[-1]} age={age:g}/30s last_guard_safe={observation['guard_safe']}")
                     demand, quiet = MAX_LEVEL, False
                     telemetry_fault = True
             histories = self.history.setdefault(host, {})
@@ -709,7 +709,7 @@ class Controller:
                 demand = max(demand, MIN_LEVEL)
                 reasons.append(f"[load] {host} 持续负载 >=30%，3 样本跨度={load_points[-1][0] - load_points[0][0]:g}/6s，较低档位能力未验证")
             if node.get("cpu_load") is None or node.get("gpu_load") is None:
-                reasons.append(f"[fault] {host} 负载数据缺失 cpu={node.get('cpu_load')} gpu={node.get('gpu_load')}，全风保护")
+                reasons.append(f"[fault] {host} 负载数据缺失 cpu={node.get('cpu_load')} gpu={node.get('gpu_load')}，保护风力请求")
                 demand, quiet = MAX_LEVEL, False
                 telemetry_fault = True
             complete[host] = bool(credible)
@@ -825,7 +825,7 @@ class Controller:
                 if (temp >= hard - 2 or coherent > 0 and accepted >= hard
                         or group in ("cpu", "gpu") and temp >= 70 and coherent > 0):
                     thermal_risk = True
-                    reasons.append(f"[hard] {host} {sensor_name} 实温/连续升温预测触发全风 "
+                    reasons.append(f"[hard] {host} {sensor_name} 实温/连续升温预测触发保护风力 "
                                    f"T={temp:g} raw_projection={temp + safety * 30:.3f}/{hard}C "
                                    f"raw={safety:.4f} soft={soft:.4f}/0.3C/s robust={slope:.4f} long={long:.4f} "
                                    f"short={rapid:.4f} qualified={qualified} sustained_rise={sustained_rise} "
@@ -1135,7 +1135,7 @@ class Controller:
             self.history.clear()
             self.positive_since.clear()
             reasons.insert(0, "[feedback] 原请求60s执行截止已到期，晚到确认不能消除超时")
-            return result("protect", f"execution_timeout original_deadline={episode.original_deadline:g}，请求16并重建启动证据")
+            return result("protect", f"execution_timeout original_deadline={episode.original_deadline:g}，请求保护风力并重建启动证据")
 
         if frame["telemetry_fault"] or not healthy and hold is None or frame["thermal_risk"]:
             fault = frame["telemetry_fault"] or not healthy
@@ -1159,8 +1159,8 @@ class Controller:
                     if s["temp"] >= s["hard"] - 2 or s["rise"] > 0 and s["projected"] >= s["hard"]
                     or s["group"] in ("cpu", "gpu") and s["temp"] >= 70 and s["rise"] > 0}
             if not healthy:
-                reasons.insert(0, "[feedback] 净化器实际反馈未知、过期或异常，有效期<=9s，全风请求尚不代表执行")
-            return result("protect", "保护请求16，等待当前目的档位匹配读回及当前安全证据")
+                reasons.insert(0, "[feedback] 净化器实际反馈未知、过期或异常，有效期<=9s，保护风力请求尚不代表执行")
+            return result("protect", "保护风力请求，等待当前目的档位匹配读回及当前安全证据")
 
         node_hold = frame.get("node_hold")
         if node_hold is not None and (hold is None or node_hold["level"] >= hold["level"]):

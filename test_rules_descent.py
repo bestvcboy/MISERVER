@@ -657,3 +657,12 @@ class HighWindAuthorityTests(unittest.TestCase):
             d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
         self.assertEqual(d["level"], 10)
         self.assertFalse(c.high_wind.allowed)
+
+
+    def test_capped_protection_diagnostics_do_not_claim_a_sixteen_request(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        d = c.decide([], 0, minimum_level=0, feedback=feedback(0, 10))
+        self.assertEqual(d["level"], 10)
+        self.assertIn("保护风力请求，等待当前目的档位匹配读回及当前安全证据", d["scenario_detail"])
+        self.assertNotIn("全风", " ".join(d["reasons"]))
+        self.assertNotIn("请求16", d["scenario_detail"])

@@ -179,6 +179,12 @@ assert.ok(!get('alarm').textContent.includes('全风请求已匹配'));
 context.status.decision.scenario = 'protect';
 evaluate('render(status)');
 assert.match(get('alarm').textContent, /保护请求 10 档.*已匹配实际读回/);
+context.status.nodes[0].online = false;
+evaluate('render(status)');
+assert.match(get('nodes').innerHTML, /缺失数据，当前保护请求 10 档/);
+assert.match(get('alarm').textContent, /当前保护请求 10 档/);
+context.status.nodes[0].online = true;
+
 context.status.requested_level = context.status.fan.level = 16;
 evaluate('render(status)');
 assert.match(get('alarm').textContent, /已匹配实际读回/);
