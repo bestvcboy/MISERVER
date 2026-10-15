@@ -12,7 +12,7 @@ let settingsDirty = false;
 let settingsSaving = false;
 let settingsUnknown = false;
 const settingsControls = ['retention', 'capacity', 'control-mode', 'settings-save', 'settings-cancel'];
-const modeOptions = [new Option('自动温控 · 按温度余量降档 · 保护至 16', 'automatic'),
+const modeOptions = [new Option('自动温控 · 固定规则平稳调节', 'automatic'),
   ...Array.from({length:17}, (_, level) => new Option(`手动 ${level} 档${level === 0 ? ' · 仍在运转' : ''}`, String(level)))];
 $('control-mode').replaceChildren(...modeOptions);
 $('control-mode').value = '16';
@@ -219,8 +219,16 @@ function trialDetails(decision) {
   const operation = decision?.execution_trial;
   const experiment = decision?.trial;
   const current = operation ? ` 当前执行 ${operation.from}→${operation.to} · ${operation.status} · ${operation.to < operation.from ? `计划下降 ${operation.planned_step || 1} 档` : '上调请求'} · 请求 ${numeric(operation.requested_at, 3)} · 原截止 ${numeric(operation.original_deadline, 3)} · 目的请求 ${numeric(operation.destination_requested_at, 3)}。` : '';
-  const previous = experiment ? ` 下降试验 ${experiment.from}→${experiment.to} · ${experiment.outcome || experiment.status}。` : '';
-  return current + previous;
+  const transition = experiment?.transition;
+  const outcome = {failed: '试降后升温，恢复原安全档', invalidated: '证据中断，取消本次评估'};
+  const witness = transition?.witness;
+  const source = Array.isArray(witness?.source) ? witness.source.join(' / ') : '';
+  const cause = transition ? ` · 时间 ${numeric(transition.at, 3)} · ${transition.cause || ''}${source ? ` · 来源 ${source}` : ''}${Number.isFinite(witness?.actual_c) ? ` · 实温 ${numeric(witness.actual_c)}°C` : ''}` : '';
+  const previous = experiment ? ` 历史下降 ${experiment.from}→${experiment.to} · ${outcome[experiment.outcome] || experiment.outcome || experiment.status}${cause}。` : '';
+  const operating = decision?.operating ? ` 需求 ${decision.demand} · 下一允许档 ${decision.level} · ${decision.operating.phase} · 已观察 ${numeric(decision.operating.observe_credit)} 秒。` : '';
+  const floor = decision?.operating?.failed_floor;
+  const blocked = floor ? ` 暂停重试 ${floor.failed_level} 档及以下 · 失败时间 ${numeric(floor.failed_at, 3)}。` : '';
+  return operating + current + previous + blocked;
 }
 
 function renderHistory(data) {

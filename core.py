@@ -5,7 +5,7 @@ import re
 import tempfile
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 
@@ -127,6 +127,36 @@ class HighWindAuthority:
     observed_mono: float | None = None
 
 
+@dataclass(frozen=True)
+class MotionAuthority:
+    observed_mono: float | None = None
+    source: tuple | None = None
+    actual_c: float | None = None
+    critical_c: float | None = None
+    restore_level: int | None = None
+    restore_from: int | None = None
+    deadline: float | None = None
+
+
+@dataclass
+class OperatingState:
+    phase: str = "hold"
+    confirmed_level: int | None = None
+    identity: tuple | None = None
+    observe_credit: float = 0
+    last_evidence_at: float | None = None
+    last_feedback: float = -math.inf
+    evidence_qualified: bool = False
+    settle_required: float = 0
+    last_increase: float = -math.inf
+    workload_epoch: tuple | None = None
+    idle_credit: float = 0
+    failed_floor: dict | None = None
+    failure_credit: float = 0
+    failure_qualification: str | None = None
+    last_transition: dict = field(default_factory=dict)
+
+
 class Controller:
     level = _PolicyField()
     phase = _PolicyField()
@@ -147,6 +177,8 @@ class Controller:
         self._rules_only = bool(rules_only)
         self.high_wind_gate = high_wind_gate
         self.high_wind = HighWindAuthority()
+        self.motion = MotionAuthority()
+        self.operating = OperatingState()
         self.hosts = set(hosts)
         self._policy = dict(level=MAX_LEVEL, phase="protect", trial=None, baseline=None,
                             mode=None, operation=None, last_feedback=-math.inf, last_drop=-math.inf,
@@ -294,6 +326,7 @@ class Controller:
             trial["planned_step"] = diagnostic.get("planned_step", 1)
             trial["profile"] = diagnostic.get("profile")
             trial["purpose"] = diagnostic.get("purpose")
+            trial["transition"] = diagnostic.get("transition")
             for key in ("requested_at", "original_deadline", "destination_requested_at"):
                 value = diagnostic.get("requested_at" if key == "destination_requested_at" and not execution else key)
                 if type(value) in (int, float) and math.isfinite(value):
@@ -320,7 +353,12 @@ class Controller:
         return {"level": self.level, "reasons": [detail] + summaries[:15],
                 "rise_c_per_min": slopes or {}, "trend_complete": complete or {}, "limits": LIMITS,
                 "scenario": scenario, "scenario_detail": detail, "learning_eligible": eligible,
-                "trial": trial, "execution_trial": execution, "retry_blocked": False,
+                "trial": trial, "execution_trial": execution,
+                "retry_blocked": self.operating.failed_floor is not None if self.high_wind_gate and self.rules_only else False,
+                "demand": getattr(self, "demand", self.level),
+                "operating": dict(phase=self.operating.phase, observe_credit=self.operating.observe_credit,
+                    last_transition=self.operating.last_transition, failed_floor=self.operating.failed_floor)
+                    if self.high_wind_gate and self.rules_only else None,
                 "high_wind_gate": self.high_wind_gate,
                 "high_wind_limit": self.effective_limit(self.last_evaluation or 0),
                 "high_wind_witness": self.high_wind.witness if self.high_wind.allowed else None,
@@ -328,6 +366,21 @@ class Controller:
 
     def protect(self, reason, now=None):
         now = (self.last_evaluation if self.last_evaluation is not None else 0) if now is None else now
+        if self.rules_only and self.high_wind_gate:
+            self.motion = MotionAuthority()
+            self.operating.observe_credit = 0
+            self.operating.settle_required = max(60, self.operating.settle_required)
+            self.operating.last_transition = dict(outcome="invalidated", at=now, cause=str(reason), witness=None)
+            self._finish_trial("invalidated")
+            if self.trial is not None:
+                self.trial["transition"] = dict(self.operating.last_transition)
+            self._policy["last_downward"] = None
+            self._policy["fan_transport_safe"] = None
+            self.demand = self.effective_limit(now)
+            actual = self.operating.confirmed_level
+            self.level = self.demand if actual is None else min(self.demand, actual + 2)
+            self.operating.phase = "hold"
+            return self._decision("protect", str(reason))
         actual = self.level
         self._finish_trial("invalidated")
         self._retire_search()
@@ -868,13 +921,24 @@ class Controller:
                         and not power_guard and not power_warning and not load_event and not target_risk
                         and soft_margin >= 5 and bool(complete) and all(complete.values())
                         and bool(evidence) and all(sensor["covered"] for sensor in evidence.values()))
-        self._policy["fan_transport_safe"] = now if safe_thermal else None
+        if not (self.high_wind_gate and self.rules_only):
+            self._policy["fan_transport_safe"] = now if safe_thermal else None
+        elif safe_thermal and self._feedback_valid(feedback, now) and feedback.get("confirmed") is True:
+            if not feedback.get("readback_hold") and not any(r.get("interrupted") for r in node_records.values()):
+                self._policy["fan_transport_safe"] = now
+        elif not (self.high_wind_gate and self.rules_only and not telemetry_fault and not thermal_risk
+                  and not target_risk and not power_warning and not power_guard and not load_event and not wifi_gap
+                  and all(n.get("online") or n.get("failure_kind") == "transport" for n in nodes)
+                  and (any(r.get("interrupted") for r in node_records.values())
+                       or isinstance(feedback, dict) and (feedback.get("readback_hold")
+                           or feedback.get("readback_failure") == "initial_transport"))):
+            self._policy["fan_transport_safe"] = None
         for node in nodes:
             host = node["host"]
             record = node_records.get(host)
             own_sensors = [sensor for key, sensor in evidence.items() if key[0] == host]
             node_low_risk = (low_risk and complete.get(host) and bool(own_sensors)
-                             and all(sensor["covered"] and sensor["target"] - sensor["projected"] >= 10
+                             and all(sensor["covered"] and sensor["target"] - sensor["projected"] >= (5 if self.high_wind_gate and self.rules_only else 10)
                                      for sensor in own_sensors))
             if record is not None and not record.get("interrupted") and node.get("online") and not node_low_risk:
                 node_records.pop(host)
@@ -884,8 +948,8 @@ class Controller:
                     if record["recovering"] is None:
                         record["recovering"] = node["requested_mono"]
                     elif (node["requested_mono"] - record["recovering"] >= 3
-                          and feedback["level"] >= min(self.effective_limit(now), max(record["safe"], 16 if now - record["last_good"] >= 18
-                                                        else 10 if now - record["last_good"] >= 9 else 0))
+                          and feedback["level"] >= min(self.effective_limit(now), max(record["safe"], 16 if (record["recovering"] if self.high_wind_gate and self.rules_only else now) - record["last_good"] >= 18
+                                                        else 10 if (record["recovering"] if self.high_wind_gate and self.rules_only else now) - record["last_good"] >= 9 else 0))
                           and feedback.get("confirmed") is True and feedback.get("execution") == "matched"):
                         node_records.pop(host)
                         record = None
@@ -895,14 +959,248 @@ class Controller:
                     interrupted=False, recovering=None)
         interrupted = [(host, record) for host, record in node_records.items() if record.get("interrupted")]
         if interrupted:
-            floor = max(max(record["safe"], 16 if now - record["last_good"] >= 18
-                            else 10 if now - record["last_good"] >= 9 else 0) for _, record in interrupted)
+            floor = max(max(record["safe"], 16 if (record["recovering"] if self.high_wind_gate and self.rules_only and record["recovering"] is not None else now) - record["last_good"] >= 18
+                            else 10 if (record["recovering"] if self.high_wind_gate and self.rules_only and record["recovering"] is not None else now) - record["last_good"] >= 9 else 0) for _, record in interrupted)
             frame["node_hold"] = dict(level=floor, until=now + 3, failures=len(interrupted),
                                       stage="node", recovering=any(record["recovering"] is not None for _, record in interrupted),
                                       hosts=[host for host, _ in interrupted])
         if telemetry_fault or thermal_risk or wifi_gap:
             self.power_exposure.clear()
+        if self.rules_only and self.high_wind_gate:
+            return self._advance_fixed(frame)
         return self._advance(frame)
+
+    @property
+    def communication_anchor(self):
+        return self._policy["fan_transport_safe"]
+
+    def communication_safe(self, now):
+        stamp = self.communication_anchor
+        return stamp is not None and 0 <= now - stamp <= (30 if self.high_wind_gate and self.rules_only else 6)
+
+    def _advance_fixed(self, frame):
+        now, evidence, state = frame["now"], frame["evidence"], self.operating
+        feedback, policy = frame["feedback"] or {}, self._policy
+        healthy = self._feedback_valid(feedback, now)
+        actual = feedback["level"] if healthy else state.confirmed_level
+        matched = healthy and feedback.get("confirmed") is True and feedback.get("execution") == "matched"
+        stamp = feedback.get("observed_mono", -math.inf) if healthy else -math.inf
+        advancing = healthy and stamp > state.last_feedback
+        context = self._context(frame["nodes"]) if not frame["telemetry_fault"] else None
+        identity = tuple(sorted((n["host"], n.get("hostname"), n.get("power_source"),
+            tuple(sorted((v["id"], v["group"]) for v in n.get("sensors", [])))) for n in frame["nodes"]))
+        identity_changed = context is not None and state.identity is not None and identity != state.identity
+        elapsed = min(3, max(0, now - state.last_evidence_at)) if state.last_evidence_at is not None else 0
+        continuous = state.last_evidence_at is not None and 0 < now - state.last_evidence_at <= 6
+        state.last_evidence_at = now
+        state.last_feedback = max(state.last_feedback, stamp)
+        self.motion = MotionAuthority()
+        self.demand = max(frame["minimum"], frame["manual"] or 0, actual or 0)
+        frame["reasons"] = [reason for reason in frame["reasons"]
+            if not reason.startswith(("[power]", "[load]"))]
+        limit = self.effective_limit(now)
+        load = max((max(n.get("cpu_load") if n.get("cpu_load") is not None else 100, n.get("gpu_load") if n.get("gpu_load") is not None else 100) for n in frame["nodes"] if n.get("online")), default=100)
+        power = max((n.get("power_w") or 0 for n in frame["nodes"] if n.get("online")), default=0)
+        warming = any(s["rise"] > 0 or s["persistent_heat"] for s in evidence.values())
+        qualified = (healthy and matched and context is not None and not identity_changed
+            and not frame["telemetry_fault"] and not frame["wifi_gap"] and not frame["uncertain"]
+            and bool(evidence) and all(s["covered"] for s in evidence.values()))
+        credit = elapsed if qualified and state.evidence_qualified and advancing and continuous else 0
+        state.evidence_qualified = qualified
+
+        def transition(outcome, cause, witness=None):
+            state.last_transition = dict(outcome=outcome, at=now, cause=cause, witness=witness)
+            if self.trial is not None and outcome in ("failed", "invalidated"):
+                self._finish_trial(outcome)
+                self.trial["transition"] = dict(state.last_transition)
+
+        def result(tag, detail):
+            self.phase = state.phase
+            return self._decision(tag, detail, frame["reasons"], frame["slopes"], frame["complete"], False)
+
+        def request(target, purpose="reserve", step=1):
+            self._request(target, actual if actual is not None else self.level, now, context,
+                purpose=purpose, profile="rules" if purpose == "release" else "ordinary", descent_limit=step)
+            if self._pending():
+                policy["operation"]["motion"] = self.motion
+            state.observe_credit = 0
+            state.phase = "descending" if actual is not None and target < actual else "ascending"
+
+        hold = feedback.get("readback_hold")
+        if not (isinstance(hold, dict) and type(hold.get("until")) in (int, float)
+                and now < hold["until"] and not feedback.get("fault") and not feedback.get("protection_interrupted")):
+            hold = None
+        node_hold = frame.get("node_hold")
+        if node_hold and (hold is None or node_hold["level"] > hold["level"]):
+            hold = node_hold
+        emergency = next(((key, s) for key, s in evidence.items() if s["temp"] >= s["hard"]), None)
+        if emergency:
+            key, sensor = emergency
+            self.motion = MotionAuthority(now, key, sensor["temp"], sensor["hard"])
+        if not qualified and (not healthy or not matched or context is None or identity_changed
+                             or frame["telemetry_fault"] or frame["wifi_gap"]):
+            state.observe_credit = state.failure_credit = 0
+            state.settle_required = max(state.settle_required, 60)
+            if self.trial is not None and self.trial.get("outcome") not in ("failed", "invalidated"):
+                transition("invalidated", "反馈、通信或来源证据中断", dict(source=identity))
+            policy["last_downward"] = None
+        if identity_changed:
+            state.failed_floor = None
+        if context is not None:
+            state.identity = identity
+        if actual is None or frame["telemetry_fault"] or not healthy and hold is None:
+            self.demand = limit
+            state.phase = "hold"
+            if actual is not None:
+                request(limit if self.motion.source is not None else min(limit, actual + 2))
+            else:
+                self.level = limit
+            return result("protect", "保护风力请求，等待当前目的档位匹配读回及当前安全证据；实际未知时禁止盲写")
+        policy["startup_required"] = False
+        if hold is not None and not frame["thermal_risk"] and self.motion.source is None:
+            if self._pending() and now >= policy["operation"]["episode"].original_deadline:
+                transition("invalidated", "通信期间原执行60秒截止到期")
+                policy["operation"].update(episode=None, status="execution_timeout", outcome="execution_timeout")
+                self.demand = limit
+                request(min(limit, actual + 2) if actual is not None else limit, "protect")
+                return result("protect", "execution_timeout 原执行截止已到期，通信宽限不能续期")
+            state.observe_credit = 0
+            state.phase = "hold"
+            self.level = min(limit, max(hold["level"], actual or 0))
+            return result("communication_hold", "通信中断，保留有界安全档；实际反馈仍按未知报告")
+
+        if state.confirmed_level is None:
+            state.confirmed_level = actual
+            self.level = actual
+        operation = policy["operation"]
+        if self._pending():
+            episode = operation["episode"]
+            if now >= episode.original_deadline:
+                transition("invalidated", "执行超过原始60秒截止")
+                operation.update(episode=None, status="execution_timeout", outcome="execution_timeout")
+                state.settle_required = 60
+                self.demand = limit
+                request(min(limit, actual + 2), "protect")
+                return result("protect", "execution_timeout 原始60秒执行截止到期，保护风力请求，等待真实读回")
+            elif (advancing and matched and actual == operation["destination"]
+                    and stamp > operation["destination_requested_at"]):
+                operation.update(episode=None, confirmed_at=now, status="confirmed", elapsed=0)
+                previous = state.confirmed_level
+                state.confirmed_level = actual
+                state.observe_credit = 0
+                state.settle_required = 120 if operation["purpose"] == "rollback" else 60
+                state.phase = "settling"
+                self.level = actual
+                if actual > previous:
+                    state.last_increase = now
+                if actual < previous:
+                    self.last_drop = now
+                    policy["last_downward"] = dict(edge=(previous, actual), reference=operation["temperatures"],
+                        identity=identity, context=context, load=load, power=power)
+                    self._finish_trial("recovery_released")
+                return result("recovery_released", "目的档位正转速已确认，开始热响应观察")
+            else:
+                if not frame["thermal_risk"] and not emergency:
+                    if operation["destination"] < actual and (not qualified or warming or load >= 30 or power >= 80):
+                        transition("invalidated", "下降期间温度或负载资格改变")
+                        operation.update(episode=None, status="invalidated", outcome="invalidated")
+                        self.level = actual
+                        state.settle_required = 60
+                    else:
+                        self.motion = operation.get("motion", MotionAuthority())
+                        return result("trial_pending", "等待目的档位正转速读回，保持原始执行截止")
+        if actual != state.confirmed_level:
+            transition("invalidated", "实际档位出现未请求变化，原下降边不可归因", dict(actual_level=actual))
+            policy["last_downward"] = None
+            state.confirmed_level = actual
+            state.observe_credit = 0
+            state.settle_required = max(60, state.settle_required)
+            state.phase = "settling"
+            self.level = actual
+
+        edge = policy["last_downward"]
+        if edge is not None and (load >= edge["load"] + 15 or power >= edge["power"] * 1.2):
+            transition("invalidated", "下降后负载或功率发生显著变化，原下降边不可归因", dict(load=load, power=power))
+            policy["last_downward"] = edge = None
+            state.observe_credit = 0
+        witnesses = [(key, sensor) for key, sensor in evidence.items() if sensor["covered"] and
+            (sensor["projected"] >= sensor["target"] - 2 or sensor["persistent_heat"]
+             and sensor["projected"] > sensor["target"] - 5 and edge is not None
+             and sensor["temp"] - edge["reference"].get((key[0], key[1]), sensor["temp"]) > 2)]
+        if (edge is not None and actual == edge["edge"][1] and edge["identity"] == identity
+                and qualified and load < edge["load"] + 15 and power < edge["power"] * 1.2 and witnesses):
+            key, sensor = witnesses[0]
+            witness = dict(source=key, actual_c=sensor["temp"], projected_c=sensor["projected"], target_c=sensor["target"])
+            transition("failed", "试降后同源温度达到恢复条件", witness)
+            failure = dict(safe_level=edge["edge"][0], failed_level=actual, load=load, power=power,
+                           failed_at=now, identity=identity, witness=witness)
+            if state.failed_floor is None or failure["failed_level"] >= state.failed_floor["failed_level"]:
+                state.failed_floor = failure
+            self.motion = MotionAuthority(restore_level=edge["edge"][0], restore_from=actual, deadline=now + 60)
+            request(min(limit, edge["edge"][0]), "rollback")
+            policy["last_downward"] = None
+            return result("recovery", "试降升温，恢复该下降边先前确认的安全档")
+        failure = state.failed_floor
+        if failure is not None:
+            lower = load <= failure["load"] - 15 and power <= failure["power"] * .8
+            cool = frame["margin"] >= 8 and not warming and now - failure["failed_at"] >= 300
+            qualification = "lower_load" if lower else "cool" if cool else None
+            if state.failure_qualification != qualification:
+                state.failure_credit = 0
+                state.failure_qualification = qualification
+            if qualified and qualification is not None:
+                state.failure_credit += credit
+                if state.failure_credit >= (60 if lower else 180):
+                    state.failed_floor = None
+                    state.failure_credit = 0
+            else:
+                state.failure_credit = 0
+        active_load = load >= 30 or power >= 80
+        idle = load <= 15 and power < 80
+        if active_load and state.workload_epoch is None:
+            state.workload_epoch = (now, actual)
+        if state.workload_epoch is not None:
+            state.idle_credit = state.idle_credit + credit if qualified and idle else 0
+            if state.idle_credit >= 60:
+                state.workload_epoch = None
+                state.idle_credit = 0
+        floor = max(frame["minimum"], frame["manual"] or 0)
+        thermal = frame["thermal_risk"] or bool(frame["deficits"]) or any(
+            s["rise"] > 0 and s["projected"] >= s["target"] - 2 for s in evidence.values())
+        target = max(floor, min(limit, frame["demand"]) if thermal else 0,
+                     min(limit, state.workload_epoch[1] + 2) if state.workload_epoch else 0)
+        if self.motion.source is not None:
+            target = limit
+        self.demand = target
+        if state.workload_epoch is not None:
+            frame["reasons"].append(f"[workload] 周期起点{state.workload_epoch[1]}档，预备需求最多加两档；负载与功率冻结下降")
+        if target > actual:
+            allowed = self.motion.source is not None or now - state.last_increase >= 10
+            if allowed and healthy and (matched or self.motion.source is not None):
+                request(target if self.motion.source is not None else min(target, actual + 2))
+                return result("graded_pending", "当前需求分步上调，每次最多两档，确认后继续观察")
+            self.level = actual
+            return result("graded_hold", "上调间隔或匹配读回尚未满足")
+        eligible = qualified and not warming and not frame["power_warning"] and not frame["power_guard"]
+        eligible = eligible and frame["margin"] >= (5 if idle else 8) and not active_load and state.workload_epoch is None
+        if eligible:
+            state.observe_credit += credit
+        elif not qualified or warming or active_load:
+            if advancing or not healthy:
+                state.observe_credit = 0
+        required = max(state.settle_required, 30 if idle and frame["margin"] >= 8 else 180)
+        step = (3 if frame["margin"] >= 10 else 2) if idle and frame["margin"] >= 8 else 1
+        if frame["manual"] is not None:
+            step = 1
+        destination = max(floor, actual - step)
+        if state.failed_floor:
+            destination = max(destination, state.failed_floor["failed_level"] + 1)
+        if eligible and state.observe_credit >= required and now - self.last_drop >= 30 and destination < actual:
+            request(destination, "release", actual - destination)
+            return result("trial_pending", "连续安全观察完成，申请下降并等待真实确认")
+        self.level = actual
+        state.phase = "settling" if state.observe_credit < state.settle_required else "hold"
+        return result("rules_release", f"固定规则观察 {state.observe_credit:g}/{required:g}s，需求{self.demand}，下一档{actual}")
 
     @staticmethod
     def _rules_warming_veto(frame):
@@ -1864,7 +2162,7 @@ class Journal:
                             ("version", "threshold_w", "source", "generated_at") if key in policy}
                             for host, policy in row["active_power_policy"].items() if isinstance(policy, dict)}
                     for key, fields in (("control", ("manual_level",)),
-                                        ("decision", ("level", "reasons", "scenario", "scenario_detail",
+                                        ("decision", ("level", "demand", "operating", "reasons", "scenario", "scenario_detail",
                                                       "learning_eligible", "trial", "execution_trial", "retry_blocked",
                                                       "trend_complete")),
                                         ("fan", ("configured", "confirmed", "level", "rpm", "power", "mode",

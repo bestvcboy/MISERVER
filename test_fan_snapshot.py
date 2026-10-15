@@ -735,7 +735,7 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
                 decision=dict(level=5), fan_request=service.FanRequest(5))
             episode.published = service.ReadbackAssessment(5, 97, 1)
             schedule.attempts, schedule.expected_level, schedule.fault = 0, None, False
-            schedule.last_attempt = 0
+            schedule.last_attempt = schedule.last_increase = 0
             snapshots = []
             def persist(attempts, expected, fault=False):
                 result = original_persist(attempts, expected, fault)
@@ -748,10 +748,10 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
             device = FakeFan(["on", "favorite", 2, 1000])
             with patch.object(schedule, "persist_debt_then_set_budget", side_effect=persist):
                 result = await apply(device)
-            self.assertEqual(device.writes, [10 if swap else 5])
-            self.assertEqual(snapshots[0], 10 if swap else 5)
+            self.assertEqual(device.writes, [4])
+            self.assertEqual(snapshots[0], 10)
             self.assertIsNone(episode.active_recovery)
-            self.assertEqual(result["level"], 10 if swap else 5)
+            self.assertEqual(result["level"], 4)
 
     async def test_thermal_permission_expires_in_service_snapshot(self):
         from test_scenarios import fleet, feedback
@@ -773,8 +773,8 @@ class HighWindWorkerTests(unittest.TestCase):
 
     def test_production_worker_requires_a_fresh_explicit_authority(self):
         from core import HighWindAuthority
-        for authority, expected in ((None, 10), (HighWindAuthority(True, ("host", "cpu"), 94), 10),
-                                    (HighWindAuthority(True, ("host", "cpu"), 99), 16)):
+        for authority, expected in ((None, 9), (HighWindAuthority(True, ("host", "cpu"), 94), 9),
+                                    (HighWindAuthority(True, ("host", "cpu"), 99), 9)):
             device = FakeFan(["on", "favorite", 7, 1000])
             with patch("service.time.monotonic", return_value=100):
                 result = service.fan_apply(device, lambda: service.FanRequest(16, high_wind=authority),

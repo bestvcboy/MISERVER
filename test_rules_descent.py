@@ -592,7 +592,9 @@ class HighWindAuthorityTests(unittest.TestCase):
         for now, temp in ((0, 68), (3, 69), (6, 70)):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             levels.append(d["level"])
-        self.assertEqual(levels, [10, 10, 16])
+        self.assertEqual(levels, [10, 10, 12])
+        self.assertEqual(d["demand"], 16)
+        self.assertEqual(d["high_wind_limit"], 16)
         self.assertEqual(c.effective_limit(11.999), 16)
         self.assertEqual(c.effective_limit(12), 10)
         self.assertEqual(c.effective_limit(12.001), 10)
@@ -611,7 +613,8 @@ class HighWindAuthorityTests(unittest.TestCase):
             nodes = fleet(now, cpu=temp)
             nodes[1].update(online=False, failure_kind="transport", cpu_temp=None, gpu_temp=None, board_temp=None, sensors=[])
             d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-        self.assertEqual(d["level"], 16)
+        self.assertEqual(d["level"], 12)
+        self.assertEqual(d["demand"], 16)
         self.assertTrue(c.high_wind.allowed)
 
     def test_capped_startup_can_finish_on_ten(self):
@@ -644,7 +647,9 @@ class HighWindAuthorityTests(unittest.TestCase):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             if now < 6:
                 c.protect("unrelated communication interruption", now)
-        self.assertEqual(d["level"], 16)
+        self.assertEqual(d["level"], 12)
+        self.assertTrue(c.high_wind.allowed)
+        self.assertEqual(c.effective_limit(6), 16)
 
 
     def test_absent_host_breaks_its_high_wind_sample_chain(self):

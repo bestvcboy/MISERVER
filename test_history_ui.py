@@ -50,9 +50,10 @@ class HistoryUITests(unittest.TestCase):
         html = (root / 'ui.html').read_text(encoding='utf-8')
         for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', 'CPU / GPU <b>60°C</b>'):
             self.assertNotIn(retired, html)
-        for policy in ('CPU / GPU 60°C 准备至少 10 档', '同一可信传感器当前至少 70°C',
+        for policy in ('普通上调每次最多两档', '同一可信传感器当前至少 70°C',
                        '75°C 硬线', '73°C 预缓冲', '≥10°C 观察 30 秒最多降 3 档',
-                       '≥5°C 观察 30 秒最多降 2 档', '3–5°C 观察 60 秒降 1 档', '预测余量至少 5°C 时，升温趋势本身不阻止下降', '不计容量学习'):
+                       '8–10°C 最多降 2 档', '5–8°C 观察 180 秒最多降 1 档',
+                       '每次确认变化后至少观察 60 秒', '不计容量学习'):
             self.assertIn(policy, html)
 
     def test_ambient_history_projects_public_fields_and_preserves_raw_monotonic(self):
@@ -98,7 +99,7 @@ assert.match(html, /value="168">最近 7 天/);
 assert.match(html, /id="retention"[^>]+value="7"/);
 assert.match(html, /id="capacity"[^>]+value="4096"/);
 assert.ok(html.includes('当前暂停机器学习，已有学习参数不参与控制。按固定阈值、温度趋势与实际风力反馈自动控制。'));
-assert.ok(html.includes('固定功耗阈值为 80 W'));
+assert.ok(html.includes('功耗达到 80 W 暂停下降'));
 assert.ok(!html.includes('负载 30%'));
 const safetyText = '有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。';
 context.status = {controller_age_seconds:0, server_time:102, updated_at:102,
@@ -113,12 +114,13 @@ assert.equal(get('policy').textContent, '已保存 · 手动 8 档');
 assert.equal(get('desired').textContent, 16);
 assert.equal(get('actual').textContent, '8 档');
 assert.equal(get('execution').textContent, '最新请求待执行');
-context.status.decision.trial = {from:5, to:4, status:'invalidated', outcome:'invalidated', requested_at:90};
+context.status.decision.trial = {from:5, to:4, status:'invalidated', outcome:'invalidated', requested_at:90, transition:{at:99, cause:'通信中断', witness:{source:['host','cpu'],actual_c:58}}};
 context.status.decision.execution_trial = {from:4, to:10, status:'pending', outcome:null,
   requested_at:96, original_deadline:156, destination_requested_at:96, planned_step:2};
 evaluate('render(status)');
-assert.match(get('policy-detail').textContent, /当前执行 4→10 · pending.*上调请求.*原截止 156.000.*下降试验 5→4 · invalidated/);
+assert.match(get('policy-detail').textContent, /当前执行 4→10 · pending.*上调请求.*原截止 156.000.*历史下降 5→4 · 证据中断，取消本次评估/);
 assert.ok(!get('policy-detail').textContent.includes('计划下降'));
+assert.match(get('policy-detail').textContent, /时间 99.000.*通信中断.*来源 host \/ cpu.*实温 58.0°C/);
 Object.assign(context.status.decision.execution_trial, {from:10, to:8, planned_step:2});
 evaluate('render(status)');
 assert.match(get('policy-detail').textContent, /当前执行 10→8 · pending.*计划下降 2 档/);
@@ -289,7 +291,7 @@ sample.decision.trial = {from:5, to:4, status:'failed', outcome:'failed'};
 sample.decision.execution_trial = {from:4, to:10, status:'pending', requested_at:90,
   original_deadline:150, destination_requested_at:93};
 render();
-assert.match(get('history-samples').innerHTML, /当前执行 4→10 · pending.*原截止 150.000.*下降试验 5→4 · failed/);
+assert.match(get('history-samples').innerHTML, /当前执行 4→10 · pending.*原截止 150.000.*历史下降 5→4 · 试降后升温，恢复原安全档/);
 sample.decision.execution_trial.status = '<svg onload="bad()">';
 render();
 assert.ok(!get('history-samples').innerHTML.includes('<svg'));
@@ -367,7 +369,7 @@ assert.match(get('history-samples').innerHTML, /没有记录/);
 assert.match(html, /type="datetime-local" step="1"/);
 assert.equal((html.match(/<th scope="col">/g) || []).length, 11);
 assert.match(html, /class="history-scroll" role="region" tabindex="0"/);
-assert.match(get('control-mode').children[0].textContent, /按温度余量降档/);
+assert.match(get('control-mode').children[0].textContent, /固定规则平稳调节/);
 const response = (marker) => ({ok:true, json:async()=>({rows:[], samples:[{...sample, decision:{reasons:[marker]}}], samples_truncated:false, from:0, to:100})});
 (async()=>{
   const first = evaluate('history()');

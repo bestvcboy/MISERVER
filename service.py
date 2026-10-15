@@ -23,7 +23,7 @@ from miio import AirPurifier
 from miio.exceptions import DeviceException
 from miio.integrations.airpurifier.zhimi.airpurifier import OperationMode
 
-from core import Controller, HighWindAuthority, HistoryLimit, Journal, MAX_LEVEL, normalize
+from core import Controller, HighWindAuthority, MotionAuthority, HistoryLimit, Journal, MAX_LEVEL, normalize
 from learning import BUCKET, Learning, WINDOW, checkpoint_limit, context_of
 from qr_connector import BIND_CONSENT, START_CONSENT, QRError, QRConnector, strict_json
 
@@ -123,6 +123,7 @@ def trusted_peer(request):
 class MotorSchedule:
     last_attempt: float = -math.inf
     last_decrease: float = -math.inf
+    last_increase: float = -math.inf
     attempts: int = 0
     expected_level: int = None
     fault: bool = False
@@ -215,7 +216,7 @@ class MotorSchedule:
             schedule.attempts, schedule.fault = 2, True
             schedule.persistence_error = "执行预算缺失、损坏或不安全，保持只读；仅当前授权安全上限的有效读回及可靠保存可恢复"
         finally:
-            schedule.last_attempt = schedule.last_decrease = time.monotonic()
+            schedule.last_attempt = schedule.last_decrease = schedule.last_increase = time.monotonic()
         return schedule
 
 
@@ -253,7 +254,7 @@ class ReadbackEpisode:
         floor = MAX_LEVEL if stage == "lost" else max(value.hold_level, 10) if stage == "reserve" else value.hold_level
         return ReadbackAssessment(floor, value.last_good, value.failures, value.recovering_at, stage)
 
-    def accept(self, result, now, requested, *, eligible, safe_level=None, limit=MAX_LEVEL):
+    def accept(self, result, now, requested, *, eligible, safe_level=None, limit=MAX_LEVEL, anchor=None):
         old = self.published
         stamp = result.get("observed_mono")
         physical = (eligible and result.get("fault") is False and result.get("power") == "on"
@@ -262,15 +263,16 @@ class ReadbackEpisode:
                    and type(result.get("rpm")) in (int, float) and math.isfinite(result["rpm"])
                    and result["rpm"] > 0 and type(stamp) in (int, float)
                    and math.isfinite(stamp) and 0 <= now - stamp < 9)
+        accepted_stamp = min(stamp, anchor) if physical and anchor is not None else stamp
         matched = physical and result.get("confirmed") is True and result.get("execution") == "matched" and result["level"] == requested
         if physical and old.failures:
             if (matched and old.recovering_at is not None and stamp - old.recovering_at >= 3
                     and result["level"] >= min(limit, self.assessment(now).hold_level)):
-                self.published = ReadbackAssessment(requested, stamp)
+                self.published = ReadbackAssessment(requested, accepted_stamp)
             elif old.recovering_at is None and stamp > old.last_good:
                 self.published = ReadbackAssessment(old.hold_level, old.last_good, old.failures, stamp)
         elif matched:
-            self.published = ReadbackAssessment(requested, stamp)
+            self.published = ReadbackAssessment(requested, accepted_stamp)
         elif (eligible and result.get("readback_failure") == "initial_transport"
               and not result.get("fault") and not result.get("protection_interrupted")
               and old.hold_level is not None and old.last_good is not None and now >= old.last_good):
@@ -297,6 +299,7 @@ class FanRequest:
     upward_only: bool = False
     limit: int = MAX_LEVEL
     high_wind: HighWindAuthority | None = None
+    motion: MotionAuthority | None = None
 
 
 def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
@@ -314,11 +317,27 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             and 0 <= time.monotonic() - request.high_wind.observed_mono < 6)
         ceiling = min(ceiling, request.limit, MAX_LEVEL if not high_wind_gate or authorized else 10)
         return FanRequest(min(request.level, ceiling), request.protected, request.release,
-                          request.read_only_floor, request.upward_only, ceiling, request.high_wind)
+                          request.read_only_floor, request.upward_only, ceiling, request.high_wind, request.motion)
 
     def destination(request):
         if actual[2] > request.limit:
             return request.limit
+        if high_wind_gate and request.level > actual[2]:
+            motion = request.motion
+            emergency = (isinstance(motion, MotionAuthority) and motion.source is not None
+                and type(motion.observed_mono) in (int, float) and math.isfinite(motion.observed_mono)
+                and 0 <= time.monotonic() - motion.observed_mono < 6
+                and type(motion.actual_c) in (int, float) and type(motion.critical_c) in (int, float)
+                and math.isfinite(motion.actual_c) and math.isfinite(motion.critical_c)
+                and motion.critical_c >= 75 and motion.actual_c >= motion.critical_c)
+            restoration = (isinstance(motion, MotionAuthority) and type(motion.restore_level) is int
+                and motion.restore_from == actual[2] and request.level == min(request.limit, motion.restore_level)
+                and type(motion.deadline) in (int, float) and math.isfinite(motion.deadline)
+                and 0 < motion.deadline - time.monotonic() <= 60)
+            if not emergency and not restoration:
+                if time.monotonic() - schedule.last_increase < 10:
+                    return actual[2]
+                return min(request.level, actual[2] + 2)
         if request.read_only_floor is not None or request.upward_only:
             return max(request.level, actual[2])
         step, authority = 1, request.release
@@ -435,7 +454,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
     result["verified_at"] = None
     result["observed_mono"] = None
     result.update(ambient_c=None, ambient_source=None, ambient_observed_mono=None, ambient_verified_at=None)
-    def mutate(function, *args, decrease=False):
+    def mutate(function, *args, decrease=False, increase=False):
         schedule.last_attempt = time.monotonic()
         try:
             function(*args)
@@ -443,6 +462,8 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             schedule.last_attempt = time.monotonic()
             if decrease:
                 schedule.last_decrease = schedule.last_attempt
+            if increase:
+                schedule.last_increase = schedule.last_attempt
     try:
         if actual[0] != "on":
             mutate(device.on)
@@ -451,7 +472,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
         while True:
             latest = target()
             next_level = destination(latest)
-            level = min(latest.limit, max(level, next_level))
+            level = next_level if high_wind_gate else min(latest.limit, max(level, next_level))
             if level < actual[2] and time.monotonic() - schedule.last_decrease < 30:
                 level = actual[2]
             if schedule.expected_level == level:
@@ -459,7 +480,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             if not schedule.persist_debt_then_set_budget(schedule.attempts, level, schedule.fault):
                 return finish(execution="fault")
         if actual[2] != level:
-            mutate(device.set_favorite_level, level, decrease=level < actual[2])
+            mutate(device.set_favorite_level, level, decrease=level < actual[2], increase=level > actual[2])
         result["level"], result["rpm"], result["power"], result["mode"] = None, None, None, None
         actual, observed_mono, observed_wall = readback()
         running = observed(actual, observed_mono, observed_wall)
@@ -626,14 +647,14 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 or state["settings_error"] or state["pairing"] or state["settings_task"] is not None
                 or time.monotonic() - state["last_poll"] > 6 or not fan_healthy() and hold is None)
         if protected:
-            return FanRequest(limit, protected=True, limit=limit, high_wind=authority)
+            return FanRequest(limit, protected=True, limit=limit, high_wind=authority, motion=base.motion)
         level = min(limit, max(base.level, state["settings"]["manual_level"] or 0,
                     hold.hold_level if hold else 0))
         if hold is not None:
             return FanRequest(level, upward_only=True, limit=limit, high_wind=authority)
         release = (base.release if base.level == level and not base.protected
                    and state["settings"]["manual_level"] is None else None)
-        return FanRequest(level, release=release, limit=limit, high_wind=authority)
+        return FanRequest(level, release=release, limit=limit, high_wind=authority, motion=base.motion)
 
     def publish_request(decision, now):
         trial = decision.get("execution_trial") or {}
@@ -646,7 +667,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 and now < trial.get("original_deadline", -math.inf)):
             authority = ReleaseAuthority(trial["original_from"], trial["to"], trial["planned_step"],
                                          trial["requested_at"], trial["original_deadline"])
-        state["fan_request"] = FanRequest(decision["level"], release=authority)
+        state["fan_request"] = FanRequest(decision["level"], release=authority, motion=state["controller"].motion)
 
     def readback_hold(now):
         schedule = state["motor_schedule"]
@@ -660,8 +681,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             and now < lease.deadline
             and min(controller.effective_limit(now), max(state["fan_request"].level, state["settings"]["manual_level"] or 0, hold.hold_level)) == lease.target
             and schedule.attempts == 1 and schedule.expected_level == lease.target)
-        thermal_stamp = controller._policy["fan_transport_safe"]
-        if (thermal_stamp is None or not 0 <= now - thermal_stamp <= 6
+        if (not controller.communication_safe(now)
                 or schedule.fault or schedule.persistence_error or (schedule.attempts
                 or schedule.expected_level is not None) and not restoring or state["fan"].get("fault")
                 or state["fan"].get("execution") == "fault"
@@ -1091,13 +1111,13 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
         while not state["stop"]:
             async with state["fan_lock"]:
                 schedule = state["motor_schedule"]
-                thermal_stamp = state["controller"]._policy["fan_transport_safe"]
-                thermal_safe = (thermal_stamp is not None and 0 <= time.monotonic() - thermal_stamp <= 6)
+                thermal_safe = state["controller"].communication_safe(time.monotonic())
                 eligible = (thermal_safe and not schedule.fault and not schedule.persistence_error and schedule.attempts == 0
                             and schedule.expected_level is None
                             and not state["controller"]._policy["startup_required"])
                 if fan_healthy() and readback_episode.published.failures == 0:
-                    readback_episode.accept(state["fan"], time.monotonic(), state["decision"]["level"], eligible=eligible)
+                    readback_episode.accept(state["fan"], time.monotonic(), state["decision"]["level"], eligible=eligible,
+                        anchor=state["controller"].communication_anchor if high_wind_gate else None)
                 if not fan_healthy() and readback_hold(time.monotonic()) is None:
                     protect("风机反馈中断，重新建立保护风力基线")
                 try:
@@ -1115,6 +1135,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                             eligible=eligible and not schedule.fault and schedule.attempts == 0
                             and schedule.expected_level is None and not schedule.persistence_error,
                             limit=state["controller"].effective_limit(time.monotonic()),
+                            anchor=state["controller"].communication_anchor if high_wind_gate else None,
                             safe_level=max(state["decision"]["level"],
                                 state["controller"]._policy["operation"]["episode"].original_from
                                 if state["controller"]._pending() else 0))
