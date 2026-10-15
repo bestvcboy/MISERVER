@@ -103,7 +103,7 @@ class RulesModeTests(unittest.IsolatedAsyncioTestCase):
         self.forbidden.append(self.patches.enter_context(patch('service.context_of', side_effect=AssertionError('learned context'))))
         self.forbidden.append(self.patches.enter_context(patch('service.checkpoint_limit', side_effect=AssertionError('training budget'))))
         self.patches.enter_context(patch('service.fsync_directory'))
-        self.app = await service.create_app(self.root)
+        self.app = await service.create_app(self.root, high_wind_gate=False)
         self.state = self.app[service.STATE]
         self.functions = closure(self.app.on_startup[-1])
         self.storage = self.functions['storage']

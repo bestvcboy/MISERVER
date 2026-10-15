@@ -20,7 +20,7 @@ import check
 from core import Journal
 from service import MotorSchedule, learning_archive_usage, settings_from_disk
 
-RELEASE = 'docker-predictive-release-20261015'
+RELEASE = 'docker-transient-fault-20261015'
 STATE = Path('/home/bestvcboy/dgx-thermal/state')
 ADMISSION = Path('/home/bestvcboy/dgx-thermal-control-admission/admission.json')
 EVIDENCE = Path('/home/bestvcboy/dgx-thermal-control-evidence')
@@ -91,7 +91,7 @@ def preflight(state=STATE, admission=ADMISSION):
     return dict(release=RELEASE, catalog_sha256=expected['catalog_sha256'],
                 state_identity=expected['state_identity'], index=index, motor_fault=budget.fault,
                 motor_attempts=budget.attempts, settings=settings, strategy_mode='rules',
-                learning_enabled=False, learning_preserved_bytes=learning_usage['preserved_bytes'])
+                learning_enabled=False, high_wind_gate=True, learning_preserved_bytes=learning_usage['preserved_bytes'])
 
 
 @dataclass

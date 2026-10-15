@@ -125,7 +125,7 @@ class FanTests(unittest.TestCase):
                 with self.subTest(wire=wire, rpm=rpm), patch("service.time.time", return_value=1000):
                     fan = FakeFan(["on", "favorite", 10, rpm, wire])
                     with patch.object(fan, "send", wraps=fan.send) as send:
-                        result = fan_apply(fan, lambda: 10, MotorSchedule())
+                        result = fan_apply(fan, lambda: 10, MotorSchedule(), high_wind_gate=False)
                     send.assert_called_once_with("get_prop", ["power", "mode", "favorite_level", "motor1_speed", "temp_dec"])
                     self.assertEqual((result["confirmed"], result["level"], result["rpm"]), (rpm > 0, 10, rpm))
                     self.assertEqual((result["attempts"], result["fault"], fan.writes), (0, False, []))
@@ -140,7 +140,7 @@ class FanTests(unittest.TestCase):
             with self.subTest(actual=actual):
                 fan = FakeFan()
                 with patch.object(fan, "send", return_value=actual) as send:
-                    result = fan_apply(fan, lambda: 16, MotorSchedule())
+                    result = fan_apply(fan, lambda: 16, MotorSchedule(), high_wind_gate=False)
                 self.assertEqual(result["confirmed"], isinstance(actual, list) and len(actual) == 4)
                 self.assertEqual([result[key] for key in ("ambient_c", "ambient_source",
                                  "ambient_observed_mono", "ambient_verified_at")], [None] * 4)
@@ -155,7 +155,7 @@ class FanTests(unittest.TestCase):
             return 16
         fan = FakeFan(["on", "favorite", 16, 2080, 308])
         with patch("service.time.time", side_effect=lambda: self.clock.now + 900):
-            result = fan_apply(fan, target, self.schedule)
+            result = fan_apply(fan, target, self.schedule, high_wind_gate=False)
         self.assertEqual((result["ambient_observed_mono"], result["ambient_verified_at"]), (100, 1000))
         self.assertEqual(result["observed_mono"], 100)
 
@@ -172,7 +172,7 @@ class FanTests(unittest.TestCase):
                 with patch.object(fan, "set_favorite_level", side_effect=mutate), \
                         patch.object(fan, "send", wraps=fan.send) as send, \
                         patch("service.time.time", side_effect=lambda: self.clock.now + 900):
-                    result = fan_apply(fan, lambda: 16, MotorSchedule())
+                    result = fan_apply(fan, lambda: 16, MotorSchedule(), high_wind_gate=False)
                 self.assertEqual(send.call_count, 1 if failure == "write" else 2)
                 self.assertNotIn("secret device detail", json.dumps(result))
                 self.assertEqual(tuple(result[key] for key in ("ambient_c", "ambient_source",
@@ -185,7 +185,7 @@ class FanTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 fan = FakeFan(["on", "favorite", 14, 1500, 308])
                 with patch.object(fan, "send", side_effect=[list(fan.actual), ["on", "favorite", 16, 1500] + suffix]):
-                    result = fan_apply(fan, lambda: 16, MotorSchedule())
+                    result = fan_apply(fan, lambda: 16, MotorSchedule(), high_wind_gate=False)
                 self.assertEqual((result["confirmed"], result["attempts"], result["fault"], fan.writes), (True, 0, False, [16]))
                 self.assertEqual([result[key] for key in ("ambient_c", "ambient_source",
                                  "ambient_observed_mono", "ambient_verified_at")], [None] * 4)
@@ -193,27 +193,27 @@ class FanTests(unittest.TestCase):
 
     def test_readback_and_external_changes(self):
         fan = FakeFan(["off", "idle", 10, 1200])
-        state = fan_apply(fan, lambda: 16, self.schedule)
+        state = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertTrue(state["confirmed"])
         self.assertEqual(fan.writes, ["on", "favorite", 16])
         fan.writes.clear()
-        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertFalse(fan.writes)
 
     def test_monotonic_readback_is_physical_and_invalidated_before_writes(self):
         fan = FakeFan()
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(result.get("observed_mono"), 100)
         self.assertEqual(fan.writes, [])
         self.clock.now = 110
         fan.actual[2] = 14
         fan.lose_ack = True
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertIsNone(result.get("observed_mono"))
         self.assertFalse(result["confirmed"])
         self.assertEqual(fan.writes, [16])
         self.clock.now = 120
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(result.get("observed_mono"), 120)
         self.assertTrue(result["confirmed"])
 
@@ -224,14 +224,14 @@ class FanTests(unittest.TestCase):
             if len(calls) == 2:
                 self.clock.now += 20
             return 16
-        result = fan_apply(FakeFan(), target, self.schedule)
+        result = fan_apply(FakeFan(), target, self.schedule, high_wind_gate=False)
         self.assertEqual(result["observed_mono"], 100)
         self.assertEqual(self.clock.now, 120)
 
     def test_recovered_second_attempt_retains_protection_interruption(self):
         self.schedule.attempts, self.schedule.expected_level = 1, 16
         fan = FakeFan(["on", "favorite", 14, 1500])
-        result = fan_apply(fan, lambda: 16 if self.schedule.fault else 15, self.schedule)
+        result = fan_apply(fan, lambda: 16 if self.schedule.fault else 15, self.schedule, high_wind_gate=False)
         self.assertTrue(result["protection_interrupted"])
         self.assertTrue(result["confirmed"])
         self.assertEqual(result["level"], 16)
@@ -241,7 +241,7 @@ class FanTests(unittest.TestCase):
 
     def test_zero_rpm_not_confirmed(self):
         fan = FakeFan(["on", "favorite", 16, 0])
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertFalse(result["confirmed"])
         self.assertEqual(result["rpm"], 0)
         self.assertEqual(fan.writes, [])
@@ -249,31 +249,31 @@ class FanTests(unittest.TestCase):
     def test_pending_reduction_superseded(self):
         targets = iter([10, 16])
         fan = FakeFan(["on", "favorite", 16, 2080])
-        result = fan_apply(fan, lambda: next(targets), self.schedule)
+        result = fan_apply(fan, lambda: next(targets), self.schedule, high_wind_gate=False)
         self.assertTrue(result["confirmed"])
         self.assertEqual(fan.writes, [])
 
     def test_level_only_never_rewrites_power_or_mode(self):
         fan = FakeFan(["on", "favorite", 10, 1200])
-        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual(fan.writes, [16])
         self.clock.now += 7.99
         fan.actual[2] = 10
-        self.assertEqual(fan_apply(fan, lambda: 16, self.schedule)["execution"], "pending")
+        self.assertEqual(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["execution"], "pending")
         self.assertEqual(fan.writes, [16])
         self.clock.now += .01
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [16, 16])
 
     def test_latest_level_coalesces_in_window(self):
         fan = FakeFan(["on", "favorite", 10, 1200])
-        fan_apply(fan, lambda: 12, self.schedule)
+        fan_apply(fan, lambda: 12, self.schedule, high_wind_gate=False)
         self.clock.now += 3
-        fan_apply(fan, lambda: 14, self.schedule)
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 14, self.schedule, high_wind_gate=False)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [12])
         self.clock.now += 5
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [12, 16])
 
     def test_maximum_raised_during_power_or_mode_never_writes_stale_reduction(self):
@@ -288,7 +288,7 @@ class FanTests(unittest.TestCase):
                         target[0] = 16
                     setattr(fan, method, change)
                     schedule = MotorSchedule()
-                    result = fan_apply(fan, lambda: target[0], schedule)
+                    result = fan_apply(fan, lambda: target[0], schedule, high_wind_gate=False)
                     self.assertTrue(result["confirmed"])
                     self.assertEqual([item for item in fan.writes if type(item) is int], [16] if actual_level < 16 else [])
                     self.assertIsNone(schedule.expected_level)
@@ -304,7 +304,7 @@ class FanTests(unittest.TestCase):
                     target[0] = 0
                 fan.set_mode = change
                 schedule = MotorSchedule(last_decrease=self.clock.now - elapsed)
-                result = fan_apply(fan, lambda: target[0], schedule)
+                result = fan_apply(fan, lambda: target[0], schedule, high_wind_gate=False)
                 self.assertFalse(result["confirmed"])
                 self.assertEqual([item for item in fan.writes if type(item) is int], [16])
                 self.assertEqual(result["level"], 16)
@@ -319,7 +319,7 @@ class FanTests(unittest.TestCase):
             original(mode)
             target[0] = 16
         fan.set_mode = change
-        result = fan_apply(fan, lambda: target[0], self.schedule)
+        result = fan_apply(fan, lambda: target[0], self.schedule, high_wind_gate=False)
         self.assertFalse(result["confirmed"])
         self.assertEqual(self.schedule.expected_level, 16)
         self.assertEqual(fan.writes, ["favorite", 16])
@@ -336,11 +336,11 @@ class FanTests(unittest.TestCase):
                     self.clock.now += 10
                     raise RuntimeError("lost acknowledgement")
                 setattr(fan, method, fail)
-                result = fan_apply(fan, lambda: 16, schedule)
+                result = fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
                 self.assertFalse(result["confirmed"])
                 self.assertEqual(schedule.last_attempt, 110)
                 self.clock.now = 117.99
-                fan_apply(fan, lambda: 16, schedule)
+                fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
                 self.assertEqual(fan.writes, ["on"] if method == "on" else ["favorite"])
 
     def test_attempts_stamped_before_write_even_when_ack_lost(self):
@@ -352,29 +352,29 @@ class FanTests(unittest.TestCase):
             original(level)
         fan.set_favorite_level = write
         fan.lose_ack = True
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertFalse(result["confirmed"])
         self.assertIsNone(result["verified_at"])
         self.assertEqual(self.schedule.attempts, 1)
         self.clock.now += 1
-        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual(fan.writes, [16])
 
     def test_two_unresolved_attempts_survive_new_targets_and_credentials(self):
         fan = FakeFan(["on", "favorite", 10, 1200])
         fan.ignore_writes, fan.lose_ack = True, True
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.clock.now += 8
-        result = fan_apply(fan, lambda: 15, self.schedule)
+        result = fan_apply(fan, lambda: 15, self.schedule, high_wind_gate=False)
         self.assertTrue(result["fault"])
         replacement = FakeFan(["off", "auto", 10, 0])
         self.clock.now += 100
-        self.assertEqual(fan_apply(replacement, lambda: 14, self.schedule)["execution"], "fault")
+        self.assertEqual(fan_apply(replacement, lambda: 14, self.schedule, high_wind_gate=False)["execution"], "fault")
         self.assertEqual(replacement.writes, [])
         replacement.actual = ["on", "favorite", 14, 0]
-        self.assertTrue(fan_apply(replacement, lambda: 14, self.schedule)["fault"])
+        self.assertTrue(fan_apply(replacement, lambda: 14, self.schedule, high_wind_gate=False)["fault"])
         replacement.actual[3] = 1200
-        self.assertTrue(fan_apply(replacement, lambda: 14, self.schedule)["confirmed"])
+        self.assertTrue(fan_apply(replacement, lambda: 14, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertFalse(self.schedule.fault)
         self.assertEqual(self.schedule.attempts, 0)
         self.assertEqual(replacement.writes, [])
@@ -382,74 +382,74 @@ class FanTests(unittest.TestCase):
     def test_ignored_writes_exhaust_budget(self):
         fan = FakeFan(["on", "favorite", 10, 1200])
         fan.ignore_writes = True
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.clock.now += 8
-        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule)["fault"])
+        self.assertTrue(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["fault"])
         self.clock.now += 100
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [16, 16])
 
     def test_missing_or_malformed_readback_never_writes(self):
         fan = FakeFan()
         fan.fail = True
-        self.assertFalse(fan_apply(fan, lambda: 16, self.schedule)["confirmed"])
+        self.assertFalse(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["confirmed"])
         fan.fail = False
         for actual in ([], ["on", "auto", True, 10], ["unknown", "favorite", 10, 100],
                        ["on", "favorite", 10, float("nan")], ["on", "favorite", 10, -1]):
             fan.actual = actual
-            self.assertFalse(fan_apply(fan, lambda: 16, self.schedule)["confirmed"])
+            self.assertFalse(fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual(fan.writes, [])
         self.assertEqual(self.schedule.attempts, 0)
 
     def test_observed_state_is_unclamped(self):
         fan = FakeFan(["on", "favorite", 25, 6500])
-        result = fan_apply(fan, lambda: 16, self.schedule)
+        result = fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual((result["level"], result["rpm"]), (25, 6500))
         self.assertEqual(fan.writes, [])
 
     def test_actual_decrease_one_step_and_thirty_seconds(self):
         fan = FakeFan()
-        result = fan_apply(fan, lambda: 10, self.schedule)
+        result = fan_apply(fan, lambda: 10, self.schedule, high_wind_gate=False)
         self.assertEqual((result["level"], fan.writes), (15, [15]))
         self.clock.now += 29.99
-        fan_apply(fan, lambda: 10, self.schedule)
+        fan_apply(fan, lambda: 10, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [15])
         self.clock.now += .01
-        fan_apply(fan, lambda: 10, self.schedule)
+        fan_apply(fan, lambda: 10, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [15, 14])
         fan.actual[2] = 12
         self.clock.now += 30
-        fan_apply(fan, lambda: 0, self.schedule)
+        fan_apply(fan, lambda: 0, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [15, 14, 11])
 
     def test_decrease_ack_loss_stamps_actual_attempt_time(self):
         fan = FakeFan()
         fan.lose_ack = True
-        fan_apply(fan, lambda: 10, self.schedule)
+        fan_apply(fan, lambda: 10, self.schedule, high_wind_gate=False)
         self.assertEqual(self.schedule.last_decrease, 100)
         self.clock.now += 8
-        fan_apply(fan, lambda: 10, self.schedule)
+        fan_apply(fan, lambda: 10, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [15])
 
     def test_local_zero_and_final_integer_range(self):
         fan = FakeFan(["on", "favorite", 1, 200])
-        self.assertTrue(fan_apply(fan, lambda: 0, self.schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 0, self.schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual(fan.writes, [0])
         for invalid in (True, 1.0, -1, 17, None):
             with self.assertRaises(ValueError):
-                fan_apply(fan, lambda: invalid, self.schedule)
+                fan_apply(fan, lambda: invalid, self.schedule, high_wind_gate=False)
         changing = iter([10, 10, 17])
         with self.assertRaises(ValueError):
-            fan_apply(FakeFan(), lambda: next(changing), MotorSchedule())
+            fan_apply(FakeFan(), lambda: next(changing), MotorSchedule(), high_wind_gate=False)
 
     def test_shutdown_request_has_no_spacing_or_fault_bypass(self):
         fan = FakeFan(["on", "favorite", 10, 1200])
         self.schedule.last_attempt = self.clock.now
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
         self.schedule.fault = True
         self.clock.now += 100
-        fan_apply(fan, lambda: 16, self.schedule)
+        fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
 
     def test_settings_type_boundaries(self):
@@ -482,9 +482,9 @@ class MotorDurabilityTests(unittest.TestCase):
         fan = FakeFan(["on", "favorite", 10, 1200])
         fan.ignore_writes, fan.lose_ack = True, True
         self.clock.now = 100
-        fan_apply(fan, lambda: 16, schedule)
+        fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
         self.clock.now = 108
-        fan_apply(fan, lambda: 16, schedule)
+        fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
         record = json.loads(self.path.read_text())
         self.assertEqual(set(record), {"version", "identity", "attempts", "expected_level", "fault"})
         self.assertEqual(record["identity"], MOTOR_IDENTITY)
@@ -494,7 +494,7 @@ class MotorDurabilityTests(unittest.TestCase):
         self.clock.now = 111
         restored = self.load()
         self.assertEqual((restored.attempts, restored.fault), (2, True))
-        self.assertEqual(fan_apply(fan, lambda: 16, restored)["execution"], "fault")
+        self.assertEqual(fan_apply(fan, lambda: 16, restored, high_wind_gate=False)["execution"], "fault")
         self.assertEqual(fan.writes, [16, 16])
 
     def test_one_attempt_restart_imposes_full_eight_and_thirty_second_windows(self):
@@ -504,17 +504,17 @@ class MotorDurabilityTests(unittest.TestCase):
         restored = self.load()
         fan = FakeFan(["on", "favorite", 10, 1200])
         self.clock.now = 110.99
-        fan_apply(fan, lambda: 16, restored)
+        fan_apply(fan, lambda: 16, restored, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
         self.clock.now = 111
-        fan_apply(fan, lambda: 0, restored)
+        fan_apply(fan, lambda: 0, restored, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
         self.assertEqual(restored.attempts, 1)
         self.clock.now = 132.99
-        fan_apply(fan, lambda: 0, restored)
+        fan_apply(fan, lambda: 0, restored, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
         self.clock.now = 133
-        fan_apply(fan, lambda: 0, restored)
+        fan_apply(fan, lambda: 0, restored, high_wind_gate=False)
         self.assertEqual(fan.writes, [9])
 
     def test_interrupted_reservations_consume_budget_without_any_physical_write(self):
@@ -526,7 +526,7 @@ class MotorDurabilityTests(unittest.TestCase):
         exhausted = self.load()
         self.clock.now += 1000
         fan = FakeFan(["on", "favorite", 10, 1200])
-        self.assertTrue(fan_apply(fan, lambda: 16, exhausted)["fault"])
+        self.assertTrue(fan_apply(fan, lambda: 16, exhausted, high_wind_gate=False)["fault"])
         self.assertEqual(fan.writes, [])
 
     def test_wall_clock_jumps_never_replenish_or_shorten_restart_windows(self):
@@ -536,7 +536,7 @@ class MotorDurabilityTests(unittest.TestCase):
             with patch("service.time.time", return_value=wall):
                 restored = self.load()
                 fan = FakeFan(["on", "favorite", 10, 1200])
-                fan_apply(fan, lambda: 16, restored)
+                fan_apply(fan, lambda: 16, restored, high_wind_gate=False)
                 self.assertEqual(fan.writes, [])
                 self.assertEqual(restored.attempts, 1)
                 self.assertEqual(restored.last_attempt, self.clock.now)
@@ -566,7 +566,7 @@ class MotorDurabilityTests(unittest.TestCase):
             self.assertTrue(restored.fault)
             self.assertTrue(restored.persistence_error)
             fan = FakeFan(["on", "favorite", 10, 1200])
-            self.assertTrue(fan_apply(fan, lambda: 10, restored)["fault"])
+            self.assertTrue(fan_apply(fan, lambda: 10, restored, high_wind_gate=False)["fault"])
             self.assertEqual(fan.writes, [])
         self.path.write_text(json.dumps(valid))
         self.path.chmod(0o666)
@@ -597,7 +597,7 @@ class MotorDurabilityTests(unittest.TestCase):
             self.clock.now += 30
             fan = FakeFan(["off", "auto", 10, 1200])
             with failure:
-                result = fan_apply(fan, lambda: 16, schedule)
+                result = fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
             self.assertEqual(fan.writes, [])
             self.assertTrue(result["fault"])
             self.assertFalse(result["confirmed"])
@@ -611,14 +611,14 @@ class MotorDurabilityTests(unittest.TestCase):
             schedule.persist_debt_then_set_budget(2, 16, True)
             fan = FakeFan()
             with failure:
-                result = fan_apply(fan, lambda: 16, schedule)
+                result = fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
             self.assertTrue(result["fault"])
             self.assertFalse(result["confirmed"])
             self.assertIsNone(result["verified_at"])
             self.assertEqual(schedule.attempts, 2)
             self.assertEqual(self.load().attempts, 2)
             self.assertEqual(fan.writes, [])
-        self.assertTrue(fan_apply(fan, lambda: 16, schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual(schedule.attempts, 0)
         self.assertEqual(json.loads(self.path.read_text())["attempts"], 2)
 
@@ -628,7 +628,7 @@ class MotorDurabilityTests(unittest.TestCase):
         fan.ignore_writes = True
         for now in (100, 108):
             self.clock.now = now
-            fan_apply(fan, lambda: 16, schedule)
+            fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [16, 16])
         fan.actual[2] = 16
         write = atomic_write
@@ -639,7 +639,7 @@ class MotorDurabilityTests(unittest.TestCase):
                 raise OSError("compensating write failed")
             write(path, text)
         with patch("service.atomic_write", persist), patch("service.fsync_directory", side_effect=OSError("directory sync failed")):
-            result = fan_apply(fan, lambda: 16, schedule)
+            result = fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
         self.assertEqual(len(replacements), 2)
         self.assertTrue(result["fault"])
         self.assertFalse(result["confirmed"])
@@ -651,7 +651,7 @@ class MotorDurabilityTests(unittest.TestCase):
         fan.actual[2] = 10
         for now in (119, 141):
             self.clock.now = now
-            result = fan_apply(fan, lambda: 16, restored)
+            result = fan_apply(fan, lambda: 16, restored, high_wind_gate=False)
             self.assertEqual(result["execution"], "fault")
             self.assertFalse(result["confirmed"])
             self.assertEqual(fan.writes, [16, 16])
@@ -660,21 +660,21 @@ class MotorDurabilityTests(unittest.TestCase):
         schedule = self.load()
         self.assertTrue(schedule.persist_debt_then_set_budget(2, 16, True))
         fan = FakeFan()
-        self.assertTrue(fan_apply(fan, lambda: 16, schedule)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)["confirmed"])
         self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (0, None, False))
         record = json.loads(self.path.read_text())
         self.assertEqual((record["attempts"], record["expected_level"], record["fault"]), (2, 16, True))
         restored = self.load()
         fan.actual[2] = 10
         self.clock.now += 30
-        self.assertEqual(fan_apply(fan, lambda: 16, restored)["execution"], "fault")
+        self.assertEqual(fan_apply(fan, lambda: 16, restored, high_wind_gate=False)["execution"], "fault")
         self.assertEqual(fan.writes, [])
         fan.actual[2] = 16
-        self.assertTrue(fan_apply(fan, lambda: 16, restored)["confirmed"])
+        self.assertTrue(fan_apply(fan, lambda: 16, restored, high_wind_gate=False)["confirmed"])
         self.assertEqual(restored.attempts, 0)
         self.assertEqual(json.loads(self.path.read_text())["attempts"], 2)
         fan.ignore_writes = True
-        fan_apply(fan, lambda: 10, restored)
+        fan_apply(fan, lambda: 10, restored, high_wind_gate=False)
         self.assertEqual(fan.writes, [15])
         record = json.loads(self.path.read_text())
         self.assertEqual((record["attempts"], record["expected_level"], record["fault"]), (1, 15, False))
@@ -684,7 +684,7 @@ class MotorDurabilityTests(unittest.TestCase):
         for attempts, expected, fault in ((1, 15, False), (2, None, False)):
             with self.subTest(attempts=attempts):
                 schedule = MotorSchedule(attempts=attempts, expected_level=expected, fault=fault, budget_path=self.path)
-                self.assertTrue(fan_apply(FakeFan(), lambda: 16, schedule)["confirmed"])
+                self.assertTrue(fan_apply(FakeFan(), lambda: 16, schedule, high_wind_gate=False)["confirmed"])
                 self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (0, None, False))
                 restored = self.load()
                 self.assertEqual((restored.attempts, restored.expected_level, restored.fault),
@@ -718,7 +718,7 @@ class MotorDurabilityTests(unittest.TestCase):
             gear(value)
         fan.on, fan.set_favorite_level = on, level
         with patch("service.atomic_write", persist):
-            result = fan_apply(fan, lambda: target[0], schedule)
+            result = fan_apply(fan, lambda: target[0], schedule, high_wind_gate=False)
         self.assertFalse(result["confirmed"])
         self.assertEqual(fan.writes, ["on", "favorite", 16])
         self.assertEqual(writes[:3], [(1, 11), (1, 14), (1, 16)])
@@ -733,7 +733,7 @@ class MotorDurabilityTests(unittest.TestCase):
             if json.loads(text)["attempts"]:
                 schedule.last_decrease = self.clock.now
         with patch("service.atomic_write", persist):
-            fan_apply(fan, lambda: 10, schedule)
+            fan_apply(fan, lambda: 10, schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [])
 
     def test_blocking_mutation_completion_and_exception_start_full_windows(self):
@@ -748,16 +748,16 @@ class MotorDurabilityTests(unittest.TestCase):
                 if lost_ack:
                     raise RuntimeError("lost acknowledgement")
             fan.set_favorite_level = delayed
-            fan_apply(fan, lambda: 10, schedule)
+            fan_apply(fan, lambda: 10, schedule, high_wind_gate=False)
             self.assertEqual((schedule.last_attempt, schedule.last_decrease), (120, 120))
             self.clock.now = 127.99
-            fan_apply(fan, lambda: 16, schedule)
+            fan_apply(fan, lambda: 16, schedule, high_wind_gate=False)
             self.assertEqual(fan.writes, [15])
             self.clock.now = 149.99
-            fan_apply(fan, lambda: 10, schedule)
+            fan_apply(fan, lambda: 10, schedule, high_wind_gate=False)
             self.assertEqual(fan.writes, [15])
             self.clock.now = 150
-            fan_apply(fan, lambda: 10, schedule)
+            fan_apply(fan, lambda: 10, schedule, high_wind_gate=False)
             self.assertEqual(fan.writes, [15, 14])
 
 
@@ -915,7 +915,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
     async def test_cleanup_drains_tasks_and_closes_pools_after_settings_body_failure(self):
         for failure in (ValueError, ConnectionResetError):
             with self.subTest(failure=failure.__name__), tempfile.TemporaryDirectory() as directory:
-                app = await create_app(Path(directory), {"http://127.0.0.1:8910"})
+                app = await create_app(Path(directory), {"http://127.0.0.1:8910"}, high_wind_gate=False)
                 state = app[STATE]
                 entered, release = asyncio.Event(), asyncio.Event()
                 tasks_release, tasks_drained = asyncio.Event(), asyncio.Event()
@@ -933,7 +933,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                     await tasks_release.wait()
                     tasks_drained.set()
 
-                def final_fan(device, target, schedule, *, read_only=None):
+                def final_fan(device, target, schedule, *, read_only=None, high_wind_gate=True):
                     self.assertTrue(tasks_drained.is_set())
                     self.assertTrue(state["fan_lock"].locked())
                     self.assertIs(device, state["device"])
@@ -986,7 +986,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.origin = "http://127.0.0.1:8910"
-        self.app = await create_app(self.root, {self.origin})
+        self.app = await create_app(self.root, {self.origin}, high_wind_gate=False)
         self.startup = self.app.on_startup[-1]
         self.app.on_startup.clear()
         self.client = TestClient(TestServer(self.app))
@@ -1074,7 +1074,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                     device = FakeFan(["on", "favorite", raw["fan"]["level"], raw["fan"]["rpm"], 296])
                     with patch("service.time", clock):
                         physical = deepcopy(raw["fan"]) if producer == "raw" else await asyncio.to_thread(
-                            fan_apply, device, lambda: raw["fan"]["level"], MotorSchedule())
+                            fan_apply, device, lambda: raw["fan"]["level"], MotorSchedule(), high_wind_gate=False)
                         self.assertEqual((physical["execution"], physical["confirmed"]), ("matched", True))
                         mono, wall = raw["learning"]["mono"], raw["snapshot_at"]
                         state.update(fan=physical, decision=deepcopy(raw["decision"]), last_poll=mono, last_fan=mono)
@@ -1093,7 +1093,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                         mono += .001
                         fresh_device = FakeFan(["on", "favorite", raw["requested"], 2000, 296])
                         state["fan"] = await asyncio.to_thread(fan_apply, fresh_device,
-                                                               lambda: raw["requested"], MotorSchedule())
+                                                               lambda: raw["requested"], MotorSchedule(), high_wind_gate=False)
                         response = await self.client.get("/api/status", headers=self.headers)
                         fresh = await response.json()
                         self.assertEqual((fresh["requested_level"], fresh["fan"]["level"],
@@ -1108,7 +1108,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
 
         self.app[STATE]['device'] = None
         await self.client.close()
-        self.app = await create_app(self.root, {self.origin}, learning_enabled=True)
+        self.app = await create_app(self.root, {self.origin}, learning_enabled=True, high_wind_gate=False)
         self.startup = self.app.on_startup[-1]
         self.app.on_startup.clear()
         self.client = TestClient(TestServer(self.app))
@@ -1229,7 +1229,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
             state["device"] = None
             await self.client.close()
-            restored = await create_app(self.root, {self.origin})
+            restored = await create_app(self.root, {self.origin}, high_wind_gate=False)
             fresh = restored[STATE]
             try:
                 self.assertIsNot(fresh, state)
@@ -1264,7 +1264,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             value = {"retention_days": 3, "max_log_mb": 2048, "full_speed": legacy}
             path = self.root / "settings.json"
             path.write_text(json.dumps(value))
-            application = await create_app(self.root, {self.origin})
+            application = await create_app(self.root, {self.origin}, high_wind_gate=False)
             try:
                 self.assertEqual(json.loads(path.read_text()), value)
                 self.assertEqual(application[STATE]["settings"], {"retention_days": 3, "max_log_mb": 2048, "manual_level": level})
@@ -1602,7 +1602,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state["device"] = FakeFan()
         state["last_identity"] = time.monotonic()
         fan_loop = dict(zip(self.startup.__code__.co_freevars, (cell.cell_contents for cell in self.startup.__closure__)))["fan"]
-        def worker(device, target, schedule, *, read_only=None):
+        def worker(device, target, schedule, *, read_only=None, high_wind_gate=True):
             entered.set()
             if not release.wait(3):
                 raise AssertionError("fan barrier release missing")
@@ -1881,7 +1881,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_admin_key_is_ignored_and_preserved(self):
         (self.root / "admin-key").write_text("obsolete private content")
-        another = await create_app(self.root, {self.origin})
+        another = await create_app(self.root, {self.origin}, high_wind_gate=False)
         try:
             self.assertEqual((self.root / "admin-key").read_text(), "obsolete private content")
         finally:
@@ -1908,20 +1908,20 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         schedule = state["motor_schedule"]
         schedule.last_attempt -= 8.1
         schedule.last_decrease -= 30.1
-        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule)
+        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule, high_wind_gate=False)
         self.assertFalse(state["fan"]["confirmed"])
         self.assertEqual(state["fan"]["level"], 15)
         state["last_fan"] = state["last_poll"] = time.monotonic()
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
         self.assertEqual((await response.json())["requested_level"], 10)
         self.assertEqual(state["controller"].cool_since, 123)
-        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule)
+        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule, high_wind_gate=False)
         self.assertEqual(device.writes, [15])
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
         self.assertEqual((await response.json())["requested_level"], 10)
         schedule.last_attempt -= 8.1
         schedule.last_decrease -= 30.1
-        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule)
+        state["fan"] = fan_apply(device, lambda: state["decision"]["level"], schedule, high_wind_gate=False)
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
         self.assertEqual((await response.json())["requested_level"], 10)
         self.assertEqual(device.writes, [15, 14])

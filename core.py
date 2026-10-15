@@ -120,6 +120,13 @@ class _Episode:
     planned_step: int = 1
 
 
+@dataclass(frozen=True)
+class HighWindAuthority:
+    allowed: bool = False
+    witness: tuple | None = None
+    observed_mono: float | None = None
+
+
 class Controller:
     level = _PolicyField()
     phase = _PolicyField()
@@ -136,8 +143,10 @@ class Controller:
     search_since = _PolicyField()
     gear_window = _PolicyField()
 
-    def __init__(self, hosts, *, rules_only=False):
+    def __init__(self, hosts, *, rules_only=False, high_wind_gate=False):
         self._rules_only = bool(rules_only)
+        self.high_wind_gate = high_wind_gate
+        self.high_wind = HighWindAuthority()
         self.hosts = set(hosts)
         self._policy = dict(level=MAX_LEVEL, phase="protect", trial=None, baseline=None,
                             mode=None, operation=None, last_feedback=-math.inf, last_drop=-math.inf,
@@ -146,7 +155,7 @@ class Controller:
                             gear_window=None, state=dict(tag="protect"), startup_required=True,
                             protect_cause="startup", thermal_witnesses=set(), preparation=False,
                             cold_band=False, last_downward=None, rebound=None,
-                            learning_window=deque(maxlen=512), learning_key=None)
+                            learning_window=deque(maxlen=512), learning_key=None, node_transport={}, fan_transport_safe=None, high_wind_samples={})
         self.history = {}
         self.positive_since = {}
         self.expected = {}
@@ -156,6 +165,11 @@ class Controller:
         self.workload_history = {}
         self.workload_context = None
         self.power_exposure = {}
+
+    def effective_limit(self, now):
+        authority = self.high_wind
+        return (MAX_LEVEL if not self.high_wind_gate or authority.allowed
+                and authority.observed_mono is not None and 0 <= now - authority.observed_mono < 6 else 10)
 
     @property
     def rules_only(self):
@@ -194,10 +208,11 @@ class Controller:
                 observation.pop("noise_pending", None)
 
     def _request(self, destination, actual, now, context, *, purpose, profile, reference=None, descent_limit=1):
+        destination = min(destination, self.effective_limit(now))
         operation = self._policy["operation"]
         if (self._policy["startup_required"] and operation is not None
                 and operation["outcome"] == "execution_timeout"):
-            self.level = MAX_LEVEL
+            self.level = self.effective_limit(now)
             return
         if self._pending():
             trial = self._policy["operation"]
@@ -301,13 +316,18 @@ class Controller:
             grouped.setdefault(category, []).append(reason)
         summaries = ["; ".join(items[:3]) + (f"; 同类另 {len(items) - 3} 项" if len(items) > 3 else "")
                      for items in grouped.values()]
+        self.level = min(self.level, self.effective_limit(self.last_evaluation or 0))
         return {"level": self.level, "reasons": [detail] + summaries[:15],
                 "rise_c_per_min": slopes or {}, "trend_complete": complete or {}, "limits": LIMITS,
                 "scenario": scenario, "scenario_detail": detail, "learning_eligible": eligible,
-                "trial": trial, "execution_trial": execution, "retry_blocked": False}
+                "trial": trial, "execution_trial": execution, "retry_blocked": False,
+                "high_wind_gate": self.high_wind_gate,
+                "high_wind_limit": self.effective_limit(self.last_evaluation or 0),
+                "high_wind_witness": self.high_wind.witness if self.high_wind.allowed else None,
+                "high_wind_expires_mono": self.high_wind.observed_mono + 6 if self.high_wind.allowed else None}
 
-    def protect(self, reason):
-        now = self.last_evaluation if self.last_evaluation is not None else 0
+    def protect(self, reason, now=None):
+        now = (self.last_evaluation if self.last_evaluation is not None else 0) if now is None else now
         actual = self.level
         self._finish_trial("invalidated")
         self._retire_search()
@@ -324,7 +344,9 @@ class Controller:
         self.workload_context = None
         self._policy["learning_window"].clear()
         self._policy["learning_key"] = None
-        return self._decision("protect", str(reason))
+        decision = self._decision("protect", str(reason))
+        decision["high_wind_limit"] = self.effective_limit(now)
+        return decision
 
     @staticmethod
     def _feedback_valid(feedback, now):
@@ -342,6 +364,8 @@ class Controller:
     def _context(self, nodes):
         context = {}
         for node in nodes:
+            if not node.get("online"):
+                return None
             power = node.get("power_w")
             source = node.get("power_source")
             if (type(power) not in (int, float) or not math.isfinite(power) or power < 0
@@ -501,6 +525,7 @@ class Controller:
 
     def decide(self, nodes, now, *, minimum_level=MIN_LEVEL, power_thresholds=None,
                feedback=None, manual_level=None):
+        self.high_wind = HighWindAuthority()
         for value in (minimum_level, manual_level):
             if value is not None and (type(value) is not int or not 0 <= value <= MAX_LEVEL):
                 raise ValueError("档位必须为 0 到 16 的整数")
@@ -526,15 +551,34 @@ class Controller:
             demand, quiet = MAX_LEVEL, False
             telemetry_fault = True
         self.last_evaluation = now
+        present = {node["host"] for node in nodes}
+        for missing in self.hosts - present:
+            self._policy["high_wind_samples"].pop(missing, None)
+            self._policy["node_transport"].pop(missing, None)
+        if len(present) != len(nodes):
+            self._policy["high_wind_samples"].clear()
         if {n["host"] for n in nodes} != self.hosts or len(nodes) != len(self.hosts):
             reasons.append(f"[fault] 节点缺失 expected={sorted(self.hosts)} actual={[n['host'] for n in nodes]}，全风保护")
             demand, quiet = MAX_LEVEL, False
             telemetry_fault = True
+        node_records = self._policy["node_transport"]
         for node in nodes:
             host = node["host"]
             if (not node.get("online") or now - node.get("requested_mono", -math.inf) > 6
                     or not 0 <= now - node.get("requested_mono", -math.inf) <= 6
                     or any(node.get(k) is None for k in ("cpu_temp", "gpu_temp", "board_temp"))):
+                self._policy["high_wind_samples"].pop(host, None)
+                record = node_records.get(host)
+                if (not node.get("online") and node.get("failure_kind") == "transport"
+                        and record is not None and now >= record["last_good"]
+                        and not self._policy["startup_required"]):
+                    record.update(interrupted=True, recovering=None)
+                    complete[host] = False
+                    self.history.pop(host, None)
+                    self.positive_since.pop(host, None)
+                    reasons.append(f"[communication] {host} 节点通信中断，实际温度未知，暂停降档")
+                    continue
+                node_records.pop(host, None)
                 reasons.append(f"[fault] {host} 温度缺失或过期 age={now - node.get('requested_mono', -math.inf):g}/6s，全风保护")
                 demand, quiet = MAX_LEVEL, False
                 telemetry_fault = True
@@ -547,12 +591,16 @@ class Controller:
                           if type(sampled_at) in (int, float) and math.isfinite(sampled_at)
                           and type(source_ts) in (int, float) and math.isfinite(source_ts) else math.inf)
             if not -2 <= source_age <= 6:
+                self._policy["high_wind_samples"].pop(host, None)
+                node_records.pop(host, None)
                 reasons.append(f"[fault] {host} 来源温度时间过期或超前 age={source_age:g}s，允许-2..6s，全风保护")
                 demand, quiet, telemetry_fault = MAX_LEVEL, False, True
                 self.history.pop(host, None)
                 self.positive_since.pop(host, None)
                 continue
             if source_ts is None or source_ts <= self.sources.get(host, -math.inf):
+                self._policy["high_wind_samples"].pop(host, None)
+                node_records.pop(host, None)
                 reasons.append(f"[fault] {host} 采集时间未推进 source={source_ts} previous={self.sources.get(host)}，全风保护")
                 demand, quiet = MAX_LEVEL, False
                 telemetry_fault = True
@@ -563,8 +611,32 @@ class Controller:
                 continue
             else:
                 self.sources[host] = source_ts
+            identity = (node.get("hostname"), tuple(sorted((sensor["id"], sensor["group"]) for sensor in node["sensors"])))
+            record = node_records.get(host)
+            if record is not None and record["identity"] != identity:
+                node_records.pop(host, None)
+                if record.get("interrupted"):
+                    telemetry_fault, demand = True, MAX_LEVEL
+                    reasons.append(f"[fault] {host} 节点或传感器身份改变，全风保护")
+            samples = self._policy["high_wind_samples"]
+            previous_identity, sensor_samples = samples.get(host, (None, {}))
+            if identity != previous_identity or node.get("ambiguous_sensors"):
+                sensor_samples = {}
+            if not node.get("ambiguous_sensors"):
+                for sensor in node["sensors"]:
+                    if not sensor["calibrated"]:
+                        continue
+                    points = sensor_samples.setdefault(sensor["id"], deque(maxlen=3))
+                    points.append((source_ts, sensor["temp"]))
+                    rising = (len(points) == 3 and points[-1][0] - points[0][0] >= 6
+                        and all(0 < b[0] - a[0] <= 6 and b[1] > a[1] for a, b in zip(points, list(points)[1:])))
+                    if sensor["temp"] >= 70 and rising:
+                        self.high_wind = HighWindAuthority(True, (host, node.get("hostname"), sensor["id"]),
+                            node["requested_mono"] - max(0, source_age))
+            samples[host] = (identity, sensor_samples)
             credible = [s for s in node["sensors"] if s["calibrated"]]
             if node.get("thermal_throttle") or node.get("ambiguous_sensors"):
+                node_records.pop(host, None)
                 reasons.append(f"[fault] {host} 热节流或传感器身份不明确 throttle={node.get('thermal_throttle')} ambiguous={node.get('ambiguous_sensors')}，全风保护")
                 demand, quiet = MAX_LEVEL, False
                 thermal_risk = thermal_risk or bool(node.get("thermal_throttle"))
@@ -667,7 +739,7 @@ class Controller:
                         persistent_heat = True
                         warming = True
                         reasons.append(f"[drift] {host} {sensor_name} 三个 60s 温度中位数持续上行 "
-                                       f"old/new={medians[::-1]}，保持风力，暂停继续试降")
+                                       f"old/new={medians[::-1]}，持续升温趋势证据")
                 boundary = [index for index, point in enumerate(history) if point[0] <= now - 30]
                 points = list(history)[boundary[-1]:] if boundary else list(history)
                 pairs = [(b[1] - a[1]) / (b[0] - a[0]) for index, a in enumerate(points)
@@ -771,7 +843,7 @@ class Controller:
                             deficits.add(witness)
                         demand = max(demand, MIN_LEVEL)
                     if noise is None and (slope >= 0.05 or confirmed_warming):
-                        reasons.append(f"[warming] {host} {sensor_name} slope={slope:.4f}C/s 已开始升温，暂停试降")
+                        reasons.append(f"[warming] {host} {sensor_name} slope={slope:.4f}C/s 升温趋势证据")
                         warming = True
                 if temp > target - 2 or temp + soft * 30 > target - 2 or not ready:
                     quiet = False
@@ -788,6 +860,46 @@ class Controller:
                      margin=soft_margin, uncertain=thermal_uncertain, persistent_heat=persistent_heat,
                      cold=cold, power_guard=power_guard, power_warning=power_warning,
                      evidence=evidence, deficits=deficits)
+        low_risk = (not telemetry_fault and not thermal_risk and not wifi_gap and not thermal_uncertain
+                    and not power_guard and not power_warning and not load_event and not target_risk
+                    and self._feedback_valid(feedback, now) and feedback.get("confirmed") is True
+                    and feedback.get("execution") == "matched" and not self._policy["startup_required"])
+        safe_thermal = (not telemetry_fault and not thermal_risk and not wifi_gap and not thermal_uncertain
+                        and not power_guard and not power_warning and not load_event and not target_risk
+                        and soft_margin >= 5 and bool(complete) and all(complete.values())
+                        and bool(evidence) and all(sensor["covered"] for sensor in evidence.values()))
+        self._policy["fan_transport_safe"] = now if safe_thermal else None
+        for node in nodes:
+            host = node["host"]
+            record = node_records.get(host)
+            own_sensors = [sensor for key, sensor in evidence.items() if key[0] == host]
+            node_low_risk = (low_risk and complete.get(host) and bool(own_sensors)
+                             and all(sensor["covered"] and sensor["target"] - sensor["projected"] >= 10
+                                     for sensor in own_sensors))
+            if record is not None and not record.get("interrupted") and node.get("online") and not node_low_risk:
+                node_records.pop(host)
+                record = None
+            if record is not None and record.get("interrupted") and node.get("online"):
+                if not telemetry_fault and not thermal_risk and feedback and self._feedback_valid(feedback, now):
+                    if record["recovering"] is None:
+                        record["recovering"] = node["requested_mono"]
+                    elif (node["requested_mono"] - record["recovering"] >= 3
+                          and feedback["level"] >= min(self.effective_limit(now), max(record["safe"], 16 if now - record["last_good"] >= 18
+                                                        else 10 if now - record["last_good"] >= 9 else 0))
+                          and feedback.get("confirmed") is True and feedback.get("execution") == "matched"):
+                        node_records.pop(host)
+                        record = None
+            if node_low_risk and (record is None or not record.get("interrupted")):
+                node_records[host] = dict(last_good=node["requested_mono"], safe=feedback["level"],
+                    identity=(node.get("hostname"), tuple(sorted((sensor["id"], sensor["group"]) for sensor in node["sensors"]))),
+                    interrupted=False, recovering=None)
+        interrupted = [(host, record) for host, record in node_records.items() if record.get("interrupted")]
+        if interrupted:
+            floor = max(max(record["safe"], 16 if now - record["last_good"] >= 18
+                            else 10 if now - record["last_good"] >= 9 else 0) for _, record in interrupted)
+            frame["node_hold"] = dict(level=floor, until=now + 3, failures=len(interrupted),
+                                      stage="node", recovering=any(record["recovering"] is not None for _, record in interrupted),
+                                      hosts=[host for host, _ in interrupted])
         if telemetry_fault or thermal_risk or wifi_gap:
             self.power_exposure.clear()
         return self._advance(frame)
@@ -821,7 +933,17 @@ class Controller:
             self._finish_trial("failed")
             self._request(max(actual, edge["edge"][0], reserve), actual, now, frame["context"],
                           purpose="rollback", profile="ordinary")
-            return result("recovery", "同源持续升温接近目标，恢复先前实际确认的安全风力")
+            witnesses = []
+            for key, sensor in evidence.items():
+                primary = sensor["covered"] and sensor["projected"] >= sensor["target"] - 2
+                secondary = (sensor["covered"] and sensor["persistent_heat"]
+                    and sensor["projected"] > sensor["target"] - 5
+                    and sensor["temp"] - edge["reference"].get((key[0], key[1]), sensor["temp"]) > 2)
+                if primary or secondary:
+                    witnesses.append(f"{key[0]} {key[1]} actual={sensor['temp']:g}C "
+                        f"accepted_projection={sensor['projected']:.3f}C target={sensor['target']:g}C "
+                        f"rule={'primary(target-2)' if primary else 'secondary(own<5+rise>2)'}")
+            return result("recovery", "接近目标，恢复先前实际确认的安全风力；" + "; ".join(witnesses))
         if actual != self.level:
             self._request(max(actual, self.level, reserve), actual, now, frame["context"],
                           purpose="reserve", profile="ordinary")
@@ -891,9 +1013,6 @@ class Controller:
                 and math.isfinite(hold["until"]) and now < hold["until"]
                 and frame["feedback"].get("fault") is False
                 and not frame["feedback"].get("protection_interrupted")
-                and (not self._pending() or policy["operation"].get("readback_floor") == hold["level"]
-                     and policy["operation"]["episode"].original_from == hold["level"]
-                     and policy["operation"]["destination"] > hold["level"])
                 and not policy["startup_required"] else None)
         if not healthy:
             self.power_exposure.clear()
@@ -906,6 +1025,10 @@ class Controller:
                                  tuple(sorted((key, s["group"]) for key, s in
                                               self.expected.get(node["host"], {}).items()))) for node in nodes))
         frame.update(context=context, caller=caller, identity=identity, actual=actual)
+        limit = self.effective_limit(now)
+        self.level = min(self.level, limit)
+        if self._pending() and policy["operation"]["destination"] > limit:
+            self._request(limit, actual, now, context, purpose="protect", profile="protect")
         valid = (advancing and matched and context is not None and bool(frame["complete"])
                  and all(frame["complete"].values()) and not frame["wifi_gap"] and not frame["uncertain"])
         floor = max(frame["minimum"], frame["manual"] or 0)
@@ -1008,7 +1131,7 @@ class Controller:
             policy.update(startup_required=True, protect_cause="fault", cold_band=False,
                           state=dict(tag="protect"), rebound=None, last_downward=None)
             self._retire_search()
-            self.level, self.phase = MAX_LEVEL, "protect"
+            self.level, self.phase = self.effective_limit(now), "protect"
             self.history.clear()
             self.positive_since.clear()
             reasons.insert(0, "[feedback] 原请求60s执行截止已到期，晚到确认不能消除超时")
@@ -1039,6 +1162,9 @@ class Controller:
                 reasons.insert(0, "[feedback] 净化器实际反馈未知、过期或异常，有效期<=9s，全风请求尚不代表执行")
             return result("protect", "保护请求16，等待当前目的档位匹配读回及当前安全证据")
 
+        node_hold = frame.get("node_hold")
+        if node_hold is not None and (hold is None or node_hold["level"] >= hold["level"]):
+            hold = node_hold
         if hold is not None:
             self._finish_trial("invalidated")
             self._retire_search()
@@ -1046,13 +1172,14 @@ class Controller:
             policy.update(state=dict(tag="readback_hold"), rebound=None, last_downward=None)
             policy["learning_window"].clear()
             policy["learning_key"] = None
-            destination = max(self.level, hold["level"], reserve)
-            self._request(destination, hold["level"], now, context, purpose="reserve", profile="ordinary")
+            safe = max(hold["level"], operation["episode"].original_from if self._pending() else self.level)
+            destination = max(self.level, safe, reserve)
+            self._request(destination, actual if healthy else safe, now, context, purpose="reserve", profile="ordinary")
             if self._pending():
                 policy["operation"]["readback_floor"] = hold["level"]
             self.phase = "hold"
-            return result("readback_hold", f"{'读回已恢复，等待两次间隔3秒的匹配观察' if hold.get('recovering') else '设备读回短暂中断'}；"
-                          f"保持至少{hold['level']}档，暂停降档 failures={hold.get('failures')} remaining={hold['until'] - now:g}s")
+            return result("communication_hold" if hold.get("stage") == "node" else "readback_hold", f"{'读回已恢复，等待两次间隔3秒的匹配观察' if hold.get('recovering') else '设备读回短暂中断'}；"
+                          f"通信阶段{hold.get('stage', 'hold')}，请求至少{destination}档，实际以有效读回为准；暂停降档 failures={hold.get('failures')}")
 
         if self._pending():
             trial = policy["operation"]
@@ -1066,7 +1193,7 @@ class Controller:
                 and (not frame["cold"] or not frame["low_load"] or frame["warming"]
                      or frame["persistent_heat"] or frame["uncertain"] or frame["load_event"]))
             rules_authority_lost = (trial["profile"] == "rules" and destination < episode.original_from
-                and (confounded or not healthy or not advancing or not all(frame["complete"].values())
+                and (confounded or not healthy or not all(frame["complete"].values())
                      or trial.get("release_identity") != identity
                      or self._extend_context(trial["baseline"], context, strict=False) is None
                      or self._workload_increase(trial["reference"], means) is not None
@@ -1151,11 +1278,11 @@ class Controller:
                     f"deadline={episode.original_deadline:g}，禁止借用待执行时间")
 
         if policy["startup_required"]:
-            self.level, self.phase = MAX_LEVEL, "protect"
-            if actual != MAX_LEVEL:
+            self.level, self.phase = self.effective_limit(now), "protect"
+            if actual != self.effective_limit(now):
                 if operation is None or operation["outcome"] != "execution_timeout":
                     self._request(MAX_LEVEL, actual, now, context, purpose="protect", profile="protect")
-                return result("protect", "启动或故障恢复，等待实际16档确认")
+                return result("protect", f"启动或故障恢复，等待实际{self.effective_limit(now)}档确认")
             startup_ok = (valid and frame["quiet"] and not changed and not frame["power_warning"]
                           and frame["load_event"] != "load_spike")
             state = self._credit("startup", frame, startup_ok)

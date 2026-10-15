@@ -39,7 +39,7 @@ function render(data) {
   $('live-dot').style.background = fresh ? '#47dfb6' : '#ff8791';
   $('updated').textContent = data.updated_at ? `更新于 ${new Date(data.updated_at * 1000).toLocaleTimeString('zh-CN')}` : '等待采样';
   $('policy').textContent = data.settings.manual_level === null ? '已保存 · 自动预防性温控' : `已保存 · 手动 ${data.settings.manual_level} 档`;
-  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含升温与故障保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision);
+  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision) + (data.high_wind_gate ? ` 当前风力上限 ${data.high_wind_limit} 档。${data.high_wind_limit > 10 ? "可信温度已达70°C且连续升温，临时允许高风力。" : "常规、负载及通信异常均不请求10档以上。"}` : "");
   renderLearning(data.learning || {});
   $('desired').textContent = data.requested_level;
   $('gear-bar').innerHTML = Array.from({length:16}, (_, index) => `<i class="${index < data.requested_level ? 'on' : ''}"></i>`).join('');
@@ -61,16 +61,16 @@ function render(data) {
   $('pair-state').textContent = data.fan.configured ? '凭据已配置' : '需要连接';
   $('binding-state').textContent = !data.fan.configured ? '尚未配置本地执行凭据。' : fanConfirmed ? '本地凭据已配置，当前请求已获实际读回确认。现场散热标定仍待完成。' : '本地凭据已配置，当前执行尚未确认。' + (data.fan.error || '等待读回。');
   let alarm = '';
-  if (!fresh) alarm = '采集循环异常。当前温度不可视为实时，保护目标保持全风。';
-  else if (online < 4) alarm = '部分节点采集失败，保护目标已升至最大风力。';
-  else if (data.decision?.scenario === 'readback_hold') alarm = fanConfirmed
-    ? '设备读回已恢复，正在确认通信稳定，暂停降档。'
-    : `设备读回暂时中断，保持当前请求 ${data.requested_level} 档并暂停降档，正在重试。`;
+  if (!fresh) alarm = `采集循环异常。当前温度不可视为实时，保护请求 ${data.requested_level} 档。`;
+  else if (['readback_hold', 'communication_hold'].includes(data.decision?.scenario)) alarm = fanConfirmed
+    ? `通信恢复确认中，请求 ${data.requested_level} 档，暂停降档。`
+    : `通信暂时中断，请求 ${data.requested_level} 档并暂停降档；实际风力${fanFresh ? `为 ${data.fan.level} 档` : '未知'}，正在重试。`;
+  else if (online < 4) alarm = `部分节点采集失败，实际温度未知；当前保护请求 ${data.requested_level} 档。`;
   else if (data.decision?.scenario === 'protect' || data.nodes.some(node =>
            node.cpu_temp >= (data.decision?.limits?.cpu?.[1] ?? 75) - 2
            || node.gpu_temp >= (data.decision?.limits?.gpu?.[1] ?? 75) - 2
            || node.board_temp >= (data.decision?.limits?.board?.[1] ?? 75) - 2 || node.thermal_throttle))
-    alarm = `当前处于温度或故障保护。${fanConfirmed && data.requested_level === 16 && data.fan.level === 16 ? '16 档全风请求已匹配读回；RPM 不证明散热能力。' : '16 档全风尚未匹配确认，请检查实际读回与保护原因。'}`;
+    alarm = `当前保护请求 ${data.requested_level} 档。${data.fan.fault ? '执行预算故障锁定，保持只读。' : fanConfirmed ? '已匹配实际读回；RPM 不证明散热能力。' : '实际执行尚未确认，请查看具体保护原因。'}`;
   else if (data.nodes.some(node => node.cpu_temp >= (data.decision?.limits?.cpu?.[0] ?? 60)
            || node.gpu_temp >= (data.decision?.limits?.gpu?.[0] ?? 60)))
     alarm = `温度达到 60°C 准备区，需求至少 10 档。当前请求 ${data.requested_level}，实际 ${fanFresh ? data.fan.level : "未确认"} 档；持续缺口另行逐级评估。`;

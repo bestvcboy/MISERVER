@@ -50,8 +50,8 @@ class HistoryUITests(unittest.TestCase):
         html = (root / 'ui.html').read_text(encoding='utf-8')
         for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', 'CPU / GPU <b>60°C</b>'):
             self.assertNotIn(retired, html)
-        for policy in ('CPU / GPU 60°C 准备至少 10 档', '70°C 且当前可信持续上升',
-                       '绝对硬线为 75°C', '73°C 实温预缓冲', '≥10°C 观察 30 秒最多降 3 档',
+        for policy in ('CPU / GPU 60°C 准备至少 10 档', '同一可信传感器当前至少 70°C',
+                       '75°C 硬线', '73°C 预缓冲', '≥10°C 观察 30 秒最多降 3 档',
                        '≥5°C 观察 30 秒最多降 2 档', '3–5°C 观察 60 秒降 1 档', '预测余量至少 5°C 时，升温趋势本身不阻止下降', '不计容量学习'):
             self.assertIn(policy, html)
 
@@ -100,7 +100,7 @@ assert.match(html, /id="capacity"[^>]+value="4096"/);
 assert.ok(html.includes('当前暂停机器学习，已有学习参数不参与控制。按固定阈值、温度趋势与实际风力反馈自动控制。'));
 assert.ok(html.includes('固定功耗阈值为 80 W'));
 assert.ok(!html.includes('负载 30%'));
-const safetyText = '有效请求包含升温与故障保护。保存设置后仍须等待受限执行和设备读回。';
+const safetyText = '有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。';
 context.status = {controller_age_seconds:0, server_time:102, updated_at:102,
   settings:{manual_level:8, retention_days:7, max_log_mb:4096}, requested_level:16,
   fan:{configured:true, confirmed:false, level:8, rpm:800, power:'on', mode:'favorite', verified_at:101, execution:'pending'},
@@ -164,7 +164,7 @@ context.status.nodes = Array.from({length:4}, (_, i)=>({host:['192.168.3.180','1
 Object.assign(context.status, {requested_level:8, decision:{scenario:'readback_hold', scenario_detail:'设备读回短暂中断，保持至少8档，暂停降档'}});
 Object.assign(context.status.fan, {level:null, rpm:null, confirmed:false, execution:'pending', verified_at:null});
 evaluate('render(status)');
-assert.match(get('alarm').textContent, /读回暂时中断.*8 档.*暂停降档/);
+assert.match(get('alarm').textContent, /通信暂时中断.*8 档.*暂停降档/);
 assert.equal(get('actual').textContent, '未确认');
 assert.equal(get('rpm').textContent, '尚无有效转速读回');
 assert.ok(!get('alarm').textContent.includes('16 档全风请求已匹配'));
@@ -178,13 +178,13 @@ assert.match(get('alarm').textContent, /60°C 准备区.*请求 10，实际 10/)
 assert.ok(!get('alarm').textContent.includes('全风请求已匹配'));
 context.status.decision.scenario = 'protect';
 evaluate('render(status)');
-assert.match(get('alarm').textContent, /全风尚未匹配确认/);
+assert.match(get('alarm').textContent, /保护请求 10 档.*已匹配实际读回/);
 context.status.requested_level = context.status.fan.level = 16;
 evaluate('render(status)');
-assert.match(get('alarm').textContent, /16 档全风请求已匹配读回/);
+assert.match(get('alarm').textContent, /已匹配实际读回/);
 context.status.fan.execution = 'pending';
 evaluate('render(status)');
-assert.match(get('alarm').textContent, /全风尚未匹配确认/);
+assert.match(get('alarm').textContent, /实际执行尚未确认/);
 context.status.decision.limits.cpu = [66,80];
 evaluate("rows = [{ts:100,nodes:[{host:'192.168.3.180',cpu_temp:60}]},{ts:103,nodes:[{host:'192.168.3.180',cpu_temp:61}]}]; draw()");
 assert.match(get('chart').innerHTML, /80°C 绝对硬线 · 78°C 实温预缓冲/);

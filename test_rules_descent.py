@@ -440,7 +440,7 @@ class AuthorizedMotorTests(unittest.TestCase):
     def run_request(self,request,actual=None,schedule=None):
         fan=FakeFan(actual or ['on','favorite',10,1500])
         result=service.fan_apply(fan,request if callable(request) else lambda:request,
-                                 schedule or service.MotorSchedule())
+                                 schedule or service.MotorSchedule(), high_wind_gate=False)
         return fan,result
 
     def test_authorized_jump_is_one_write_and_thirty_second_guard_remains(self):
@@ -509,3 +509,151 @@ class AuthorizedMotorTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class TransportProtectionTests(unittest.TestCase):
+    def prepared(self):
+        c = Controller(HOSTS, rules_only=True)
+        for now in range(0, 64, 3):
+            c.decide(fleet(now, cpu=43, gpu=40, board=48, power=40), now,
+                     minimum_level=0, feedback=feedback(now, 16))
+        c.level = 5
+        c.decide(fleet(66, cpu=43, gpu=40, board=48, power=40), 66,
+                 minimum_level=0, feedback=feedback(66, 5))
+        return c
+
+    def missing(self, now, **changes):
+        nodes = fleet(now, cpu=43, gpu=40, board=48, power=40)
+        nodes[0].update(online=False, failure_kind="transport", cpu_temp=None,
+                        gpu_temp=None, board_temp=None, sensors=[], **changes)
+        return nodes
+
+    def test_node_transport_has_original_nine_and_eighteen_second_stages(self):
+        c = self.prepared()
+        observed = []
+        for now in range(69, 85, 3):
+            d = c.decide(self.missing(now), now, minimum_level=0, feedback=feedback(now, c.level))
+            observed.append(d["level"])
+            self.assertEqual(d["scenario"], "communication_hold")
+            self.assertFalse(d["learning_eligible"])
+            self.assertEqual(c._policy["node_transport"][HOSTS[0]]["last_good"], 66)
+            self.assertNotIn(HOSTS[0], c.history)
+        self.assertEqual(observed, [5, 5, 10, 10, 10, 16])
+        self.assertEqual(c.workload_history, {})
+
+    def test_staggered_node_timeouts_keep_each_nodes_own_last_complete_anchor(self):
+        c = self.prepared()
+        c.decide(self.missing(69), 69, minimum_level=0, feedback=feedback(69, 5))
+        nodes = fleet(72, cpu=43, gpu=40, board=48, power=40)
+        nodes[1].update(online=False, failure_kind="transport", cpu_temp=None,
+                        gpu_temp=None, board_temp=None, sensors=[])
+        d = c.decide(nodes, 72, minimum_level=0, feedback=feedback(72, 5))
+        self.assertEqual((d["level"], d["scenario"]), (5, "communication_hold"))
+        self.assertEqual(c._policy["node_transport"][HOSTS[1]]["last_good"], 69)
+
+    def test_node_semantic_loss_and_current_hard_heat_do_not_get_grace(self):
+        for semantic, hot in ((True, False), (False, True)):
+            c = self.prepared()
+            nodes = self.missing(69)
+            if semantic:
+                nodes[0]["failure_kind"] = "evidence"
+            if hot:
+                nodes[1] = fleet(69, cpu=74)[1]
+            d = c.decide(nodes, 69, minimum_level=0, feedback=feedback(69, 5))
+            self.assertEqual((d["level"], d["scenario"]), (16, "protect"))
+
+    def test_flapping_node_does_not_buy_another_nine_seconds(self):
+        c = self.prepared()
+        c.decide(self.missing(69), 69, minimum_level=0, feedback=feedback(69, 5))
+        c.decide(fleet(72, cpu=43, gpu=40, board=48, power=40), 72,
+                 minimum_level=0, feedback=feedback(72, 5))
+        d = c.decide(self.missing(75), 75, minimum_level=0, feedback=feedback(75, 5))
+        self.assertEqual(d["level"], 10)
+        self.assertEqual(c._policy["node_transport"][HOSTS[0]]["last_good"], 66)
+
+    def test_fresh_repeated_feedback_neither_revokes_nor_confirms_pending_jump(self):
+        c = self.prepared()
+        original = c._context(fleet(66, cpu=43, gpu=40, board=48, power=40))
+        c._request(2, 5, 66, original, purpose="release", profile="rules",
+                   descent_limit=3, reference=c._workload_mean(66, 30))
+        c._policy["operation"]["release_identity"] = tuple(sorted((node["host"], node.get("hostname"),
+            tuple(sorted((key, sensor["group"]) for key, sensor in c.expected[node["host"]].items())))
+            for node in fleet(66, cpu=43, gpu=40, board=48, power=40)))
+        d = c.decide(fleet(69, cpu=43, gpu=40, board=48, power=40), 69,
+                     minimum_level=0, feedback=feedback(66, 5, execution="pending", confirmed=False))
+        self.assertEqual((d["level"], d["execution_trial"]["status"]), (2, "pending"))
+        self.assertEqual(d["execution_trial"]["original_deadline"], 126)
+
+
+class HighWindAuthorityTests(unittest.TestCase):
+    def test_only_three_fresh_rising_hot_samples_allow_above_ten(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        levels = []
+        for now, temp in ((0, 68), (3, 69), (6, 70)):
+            d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
+            levels.append(d["level"])
+        self.assertEqual(levels, [10, 10, 16])
+        self.assertEqual(c.effective_limit(11.999), 16)
+        self.assertEqual(c.effective_limit(12), 10)
+        self.assertEqual(c.effective_limit(12.001), 10)
+
+    def test_plateau_single_spike_and_subseventy_never_authorize_high_wind(self):
+        for temps in ((73, 73, 73), (43, 43, 74), (66, 67, 69), (70, 71, 71)):
+            c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+            for now, temp in zip((0, 3, 6), temps):
+                d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
+                self.assertLessEqual(d["level"], 10)
+            self.assertFalse(c.high_wind.allowed)
+
+    def test_independent_hot_source_can_authorize_despite_another_missing_node(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        for now, temp in ((0, 68), (3, 69), (6, 70)):
+            nodes = fleet(now, cpu=temp)
+            nodes[1].update(online=False, failure_kind="transport", cpu_temp=None, gpu_temp=None, board_temp=None, sensors=[])
+            d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
+        self.assertEqual(d["level"], 16)
+        self.assertTrue(c.high_wind.allowed)
+
+    def test_capped_startup_can_finish_on_ten(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        for now in range(0, 64, 3):
+            d = c.decide(fleet(now, cpu=43, gpu=40, board=48, power=40), now,
+                         minimum_level=0, feedback=feedback(now, 10))
+        self.assertFalse(c._policy["startup_required"])
+        self.assertLessEqual(d["level"], 10)
+
+
+    def test_untrusted_identity_and_ambiguity_break_the_three_sample_chain(self):
+        for changed in ("identity", "ambiguous"):
+            c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+            for now, temp in ((0, 68), (3, 69), (6, 70)):
+                nodes = fleet(now, cpu=43)
+                hot = fleet(now, cpu=temp)[0]
+                nodes[0] = hot
+                if changed == "identity" and now == 6:
+                    hot["hostname"] = "replaced-device"
+                if changed == "ambiguous" and now == 3:
+                    hot["ambiguous_sensors"] = True
+                d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
+            self.assertEqual(d["level"], 10)
+            self.assertFalse(c.high_wind.allowed)
+
+    def test_unrelated_service_protection_does_not_erase_hot_source_evidence(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        for now, temp in ((0, 68), (3, 69), (6, 70)):
+            d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
+            if now < 6:
+                c.protect("unrelated communication interruption", now)
+        self.assertEqual(d["level"], 16)
+
+
+    def test_absent_host_breaks_its_high_wind_sample_chain(self):
+        c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        for now, temp in ((0, 68), (3, 69), (6, 69), (9, 70)):
+            nodes = fleet(now, cpu=43)
+            nodes[0] = fleet(now, cpu=temp)[0]
+            if now == 6:
+                nodes = nodes[1:]
+            d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
+        self.assertEqual(d["level"], 10)
+        self.assertFalse(c.high_wind.allowed)

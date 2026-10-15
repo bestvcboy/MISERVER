@@ -955,7 +955,7 @@ class QRHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.app = await create_app(self.root, {ORIGIN})
+        self.app = await create_app(self.root, {ORIGIN}, high_wind_gate=False)
         self.app.on_startup.clear()
         self.client = TestClient(TestServer(self.app))
         await self.client.start_server()

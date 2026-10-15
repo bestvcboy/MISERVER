@@ -51,7 +51,7 @@ class LearningStorageTests(unittest.IsolatedAsyncioTestCase):
         (directory / "checkpoint.json").write_text(checkpoint, encoding="utf-8")
         Journal(self.root / "logs").append({"ts": self.end - SLOT, "nodes": []})
         with patch("service.MotorSchedule.load", return_value=service.MotorSchedule()):
-            self.app = await service.create_app(self.root, learning_enabled=True)
+            self.app = await service.create_app(self.root, learning_enabled=True, high_wind_gate=False)
         self.state = self.app[service.STATE]
         startup = self.app.on_startup[-1]
         self.storage = closure(startup)["storage"]
