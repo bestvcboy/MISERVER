@@ -179,6 +179,7 @@ class Controller:
         self.high_wind = HighWindAuthority()
         self.motion = MotionAuthority()
         self.operating = OperatingState()
+        self._storage_safe_at = None
         self.hosts = set(hosts)
         self._policy = dict(level=MAX_LEVEL, phase="protect", trial=None, baseline=None,
                             mode=None, operation=None, last_feedback=-math.inf, last_drop=-math.inf,
@@ -364,6 +365,23 @@ class Controller:
                 "high_wind_witness": self.high_wind.witness if self.high_wind.allowed else None,
                 "high_wind_expires_mono": self.high_wind.observed_mono + 6 if self.high_wind.allowed else None}
 
+    def pause_release(self, reason, now):
+        self.operating.observe_credit = 0
+        self.operating.failure_credit = 0
+        self.operating.settle_required = max(60, self.operating.settle_required)
+        self._policy["last_downward"] = None
+        if self._pending():
+            operation = self._policy["operation"]
+            if operation["destination"] < operation["episode"].original_from:
+                self._finish_trial("invalidated")
+                operation.update(episode=None, status="invalidated", outcome="invalidated")
+                if self.operating.confirmed_level is not None:
+                    self.level = self.operating.confirmed_level
+        self.operating.last_transition = dict(outcome="invalidated", at=now, cause=reason, witness=None)
+        if self.trial is not None and self.trial.get("outcome") == "invalidated":
+            self.trial["transition"] = dict(self.operating.last_transition)
+        return self._decision("storage_hold", reason)
+
     def protect(self, reason, now=None):
         now = (self.last_evaluation if self.last_evaluation is not None else 0) if now is None else now
         if self.rules_only and self.high_wind_gate:
@@ -379,6 +397,11 @@ class Controller:
             self.demand = self.effective_limit(now)
             actual = self.operating.confirmed_level
             self.level = self.demand if actual is None else min(self.demand, actual + 2)
+            operation = self._policy["operation"]
+            if (operation is not None and operation.get("episode") is None
+                    and operation.get("confirmed_at") is not None and operation["destination"] != self.level):
+                operation.update(status="invalidated", outcome="invalidated",
+                                 transition=dict(self.operating.last_transition))
             self.operating.phase = "hold"
             return self._decision("protect", str(reason))
         actual = self.level
@@ -921,6 +944,7 @@ class Controller:
                         and not power_guard and not power_warning and not load_event and not target_risk
                         and soft_margin >= 5 and bool(complete) and all(complete.values())
                         and bool(evidence) and all(sensor["covered"] for sensor in evidence.values()))
+        self._storage_safe_at = now if safe_thermal else None
         if not (self.high_wind_gate and self.rules_only):
             self._policy["fan_transport_safe"] = now if safe_thermal else None
         elif safe_thermal and self._feedback_valid(feedback, now) and feedback.get("confirmed") is True:
@@ -969,6 +993,9 @@ class Controller:
         if self.rules_only and self.high_wind_gate:
             return self._advance_fixed(frame)
         return self._advance(frame)
+
+    def storage_safe(self, now):
+        return self._storage_safe_at is not None and 0 <= now - self._storage_safe_at <= 6
 
     @property
     def communication_anchor(self):
@@ -1891,7 +1918,7 @@ class Journal:
     @staticmethod
     def _check(work):
         if time.monotonic() > work["deadline"]:
-            raise OSError("日志维护超出时间预算")
+            raise TimeoutError("日志维护超出时间预算")
 
     @classmethod
     def _inventory(cls, root, work):

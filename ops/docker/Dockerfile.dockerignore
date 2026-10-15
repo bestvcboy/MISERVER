@@ -86,3 +86,4 @@
 !ui.js
 !release_index.json
 !test_stable_control.py
+!test_storage_tolerance.py

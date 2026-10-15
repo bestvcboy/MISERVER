@@ -74,6 +74,7 @@ function render(data) {
   else if (data.nodes.some(node => node.cpu_temp >= (data.decision?.limits?.cpu?.[0] ?? 60)
            || node.gpu_temp >= (data.decision?.limits?.gpu?.[0] ?? 60)))
     alarm = `温度达到 60°C 准备区，需求至少 10 档。当前请求 ${data.requested_level}，实际 ${fanFresh ? data.fan.level : "未确认"} 档；持续缺口另行逐级评估。`;
+  else if (data.storage_health?.phase === 'holding') alarm = `日志暂态中断，限时暂停下降；当前实际 ${fanFresh ? data.fan.level : '未知'} 档，温度保护继续有效。`;
   else if (!fanConfirmed) alarm = data.fan.error || '风力尚未确认。温度记录正在运行。';
   else if (data.settings_error || data.storage_error) alarm = data.settings_error || data.storage_error;
   $('alarm').className = `alarm ${alarm ? 'bad' : 'ok'}`;

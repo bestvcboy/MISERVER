@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import errno
 import ipaddress
 import json
 import logging
@@ -117,6 +118,62 @@ def trusted_peer(request):
     except (ValueError, TypeError, IndexError):
         return False, False
     return address.is_loopback or address in ipaddress.ip_network("192.168.3.0/24"), address.is_loopback
+
+
+@dataclass
+class StorageHealth:
+    phase: str = "healthy"
+    first_failure: float | None = None
+    consecutive_failures: int = 0
+    first_success: float | None = None
+    recovery_successes: int = 0
+    last_error: dict | None = None
+
+    def refresh(self, now, *, eligible):
+        if self.phase == "holding" and (not eligible or now - self.first_failure >= 9
+                                        or self.consecutive_failures >= 3):
+            self.phase = "protect"
+        return self.phase
+
+    def failure(self, now, wall, error, write_phase, committed, *, eligible):
+        transient = isinstance(error, TimeoutError) or isinstance(error, OSError) and error.errno in (
+            errno.EAGAIN, errno.EBUSY, errno.EINTR, errno.ETIMEDOUT)
+        if self.phase == "healthy":
+            self.first_failure = now
+            self.consecutive_failures = 0
+            self.phase = "holding"
+        self.consecutive_failures += 1
+        self.first_success = None
+        self.recovery_successes = 0
+        category = type(error).__name__ if type(error).__module__ == "builtins" else "OtherError"
+        self.last_error = dict(category=category, errno=error.errno if isinstance(error, OSError) else None,
+                               write_phase=write_phase, committed=committed, mono=now, wall=wall)
+        if not transient or committed is not False or write_phase not in ("prepare", "prune"):
+            self.phase = "protect"
+        return self.refresh(now, eligible=eligible)
+
+    def success(self, now, *, eligible):
+        self.refresh(now, eligible=eligible)
+        if self.phase == "healthy":
+            return
+        self.consecutive_failures = 0
+        if not eligible:
+            self.first_success = None
+            self.recovery_successes = 0
+            return
+        if self.first_success is None:
+            self.first_success = now
+            self.recovery_successes = 1
+        elif now - self.first_success >= 3:
+            self.recovery_successes += 1
+            self.phase = "healthy"
+            self.first_failure = None
+            self.first_success = None
+
+    def status(self):
+        return dict(phase=self.phase, first_failure_mono=self.first_failure,
+                    consecutive_failures=self.consecutive_failures,
+                    recovery_successes=self.recovery_successes, last_error=self.last_error)
 
 
 @dataclass
@@ -542,6 +599,7 @@ def learning_archive_usage(root):
 
 
 async def create_app(root, origins=None, *, learning_enabled=False, high_wind_gate=True):
+    fixed_storage = not learning_enabled and high_wind_gate
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
@@ -556,7 +614,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
              "fan": {"configured": False, "confirmed": False, "level": None, "rpm": None,
                      "fault": motor_schedule.fault, "attempts": motor_schedule.attempts,
                      "error": motor_schedule.persistence_error or "尚未绑定本地执行凭据，无法执行风力控制"}, "storage_error": "",
-             "settings_error": "", "settings_task": None,
+             "settings_error": "", "settings_task": None, "storage_health": StorageHealth(),
              "dropped_records": 0, "log_bytes": 0, "last_poll": time.monotonic(),
              "last_fan": time.monotonic(), "updated_at": None, "stop": False,
              "controller": Controller(HOSTS, rules_only=not learning_enabled, high_wind_gate=high_wind_gate), "device": None, "fan_lock": asyncio.Lock(),
@@ -638,18 +696,40 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 and type(mono) in (int, float) and math.isfinite(mono) and 0 <= time.monotonic() - mono <= 9
                 and 0 <= time.monotonic() - state["last_fan"] <= 9)
 
+    def storage_phase():
+        if not fixed_storage:
+            return "healthy", False
+        now = time.monotonic()
+        controller = state["controller"]
+        eligible = (fan_healthy() and state["fan"].get("confirmed") is True
+                    and state["fan"].get("execution") == "matched"
+                    and state["fan"].get("level") == controller.operating.confirmed_level
+                    and controller.storage_safe(now) and 0 <= now - state["last_poll"] <= 6
+                    and state["settings_task"] is None
+                    and not state["motor_schedule"].attempts and not state["motor_schedule"].persistence_error
+                    and not state["settings_error"] and not state["pairing"])
+        phase = state["storage_health"].refresh(now, eligible=eligible)
+        return phase, eligible
+
+    def storage_hard():
+        phase, _ = storage_phase()
+        return phase == "protect" or bool(state["storage_error"]) and phase == "healthy"
+
     def request_snapshot():
         base = state["fan_request"]
         limit = state["controller"].effective_limit(time.monotonic())
         authority = state["controller"].high_wind if high_wind_gate else None
         hold = readback_hold(time.monotonic())
-        protected = bool(state["force_max"] or state["storage_error"]
+        protected = bool(state["force_max"] or storage_hard()
                 or state["settings_error"] or state["pairing"] or state["settings_task"] is not None
                 or time.monotonic() - state["last_poll"] > 6 or not fan_healthy() and hold is None)
         if protected:
             return FanRequest(limit, protected=True, limit=limit, high_wind=authority, motion=base.motion)
         level = min(limit, max(base.level, state["settings"]["manual_level"] or 0,
                     hold.hold_level if hold else 0))
+        if storage_phase()[0] == "holding":
+            return FanRequest(max(level, state["fan"]["level"]), upward_only=True,
+                              limit=limit, high_wind=authority, motion=base.motion)
         if hold is not None:
             return FanRequest(level, upward_only=True, limit=limit, high_wind=authority)
         release = (base.release if base.level == level and not base.protected
@@ -701,7 +781,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
         matched = (observed.get("confirmed") is True and observed.get("fault") is False
                    and fan_healthy() and observed.get("level") == requested_level)
         trial = state["decision"].get("execution_trial")
-        if trial is not None:
+        retired = (isinstance(trial, dict) and trial.get("status") != "pending"
+                   and trial.get("outcome") in ("invalidated", "failed"))
+        if trial is not None and not retired:
             destination = trial.get("to") if isinstance(trial, dict) else None
             stamp = trial.get("destination_requested_at") if isinstance(trial, dict) else None
             matched = (matched and type(destination) is int and destination == requested_level
@@ -828,6 +910,8 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 "strategy_mode": "learning" if learning_enabled else "rules",
                 "control_active": not state["stop"] and state["updated_at"] is not None and time.monotonic() - state["last_poll"] < 8,
                 "history_recording": dict(state["history_recording"]),
+                "storage_health": state["storage_health"].status() if fixed_storage else dict(
+                    phase="protect" if state["storage_error"] else "healthy", bounded_protocol=False),
                 "fan": current_fan(requested_level),
                 "learning": (dict(state["learning"], enabled=True, active=active_power(state["nodes"], time.monotonic(), time.time()))
                              if learning_enabled else disabled_learning(state["learning"])),
@@ -892,6 +976,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     state["settings"] = actual
                 state["settings_error"] = error
                 if maintenance_error:
+                    if fixed_storage:
+                        state["storage_health"].failure(time.monotonic(), time.time(), RuntimeError(),
+                            "settings_maintenance", None, eligible=False)
                     state["storage_error"] = maintenance_error
                 if size is not None:
                     state["log_bytes"] = size
@@ -1007,7 +1094,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                                                        manual_level=minimum)
                 if not learning_enabled:
                     decision["learning_eligible"] = False
-                if (state["storage_error"] or state["settings_error"] or not fan_healthy() and hold is None
+                if storage_phase()[0] == "holding":
+                    decision.update(state["controller"].pause_release("日志暂态中断，暂停下降观察", now))
+                if (storage_hard() or state["settings_error"] or not fan_healthy() and hold is None
                         or state["pairing"] or state["settings_task"] is not None):
                     decision.update(protect())
                 state.update(nodes=nodes, decision=decision, last_poll=now, updated_at=wall)
@@ -1026,7 +1115,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 state["learning_wall"], state["learning_mono"] = wall, now
                 try:
                     state["queue"].put_nowait(row)
-                except asyncio.QueueFull:
+                except asyncio.QueueFull as error:
+                    if fixed_storage:
+                        state["storage_health"].failure(time.monotonic(), time.time(), error, "queue", False, eligible=False)
                     state["dropped_records"] += 1
                     state["storage_error"] = "磁盘写入滞后，采样记录丢失，保护风力请求"
                     protect()
@@ -1036,17 +1127,21 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 await asyncio.sleep(max(0, deadline - time.monotonic()))
 
     async def storage():
-        def write(row, config):
+        def write(row, config, outcome):
+            outcome.update(phase="prepare", committed=False)
             if learning_enabled:
                 load_learning(config)
             budget = config["max_log_mb"] * 1024**2
             encoded = len(json.dumps(row, ensure_ascii=False).encode()) + 1
             if encoded > 65536:
                 raise ValueError("记录过大")
+            outcome["phase"] = "prune"
             state["journal"].prune(time.time(), config["retention_days"],
                                    budget - encoded - Journal.SEGMENT_BYTES - learning_reserve(config))
             try:
+                outcome.update(phase="append", committed=None)
                 state["journal"].append(row)
+                outcome.update(phase="accounting", committed=True)
                 state["history_recording"].update(state="recording",
                     writes=state["history_recording"]["writes"] + 1, last_timestamp=row["ts"], error=None)
             except Exception:
@@ -1082,11 +1177,16 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             except asyncio.TimeoutError:
                 continue
             writes_before = state["history_recording"]["writes"]
+            outcome = dict(phase="dispatch", committed=False)
             try:
                 config, revision = dict(state["settings"]), state["settings_revision"]
-                size, cached = await disk_call(write, row, config)
+                size, cached = await disk_call(write, row, config, outcome)
                 state["log_bytes"] = size
-                state["storage_error"] = ""
+                if fixed_storage:
+                    _, eligible = storage_phase()
+                    state["storage_health"].success(time.monotonic(), eligible=eligible)
+                state["storage_error"] = ("" if not fixed_storage or state["storage_health"].phase == "healthy"
+                                          else "日志恢复观察中，暂停下降")
                 if not learning_enabled:
                     state["learning"] = cached
                 elif (revision == state["settings_revision"] and row.get("learning", {}).get("revision") == revision
@@ -1095,14 +1195,24 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     state["learning"] = dict(cached, settings_revision=revision)
                 else:
                     state["learning"] = dict(cached, settings_revision=-1)
-            except Exception:
-                state["dropped_records"] += 1
-                state["storage_error"] = "日志写入失败，保护风力请求。检查磁盘空间和权限。"
+            except Exception as error:
+                _, eligible = storage_phase()
+                phase = (state["storage_health"].failure(time.monotonic(), time.time(), error,
+                    outcome["phase"], outcome["committed"], eligible=eligible) if fixed_storage else "protect")
+                state["storage_error"] = ("日志暂态中断，限时暂停下降" if phase == "holding" else
+                                          "日志异常，保护风力请求。检查存储状态。")
+                if outcome["committed"] is False:
+                    state["dropped_records"] += 1
                 if state["history_recording"]["writes"] == writes_before:
-                    state["history_recording"].update(state="failed",
+                    state["history_recording"].update(state="failed" if outcome["committed"] is False else "uncertain",
                         failed_writes=state["history_recording"]["failed_writes"] + 1,
                         error=state["storage_error"])
-                protect()
+                if phase == "holding":
+                    decision = state["controller"].pause_release(state["storage_error"], time.monotonic())
+                    state["decision"].update(decision)
+                    publish_request(decision, time.monotonic())
+                else:
+                    protect(state["storage_error"])
             finally:
                 state["queue"].task_done()
 

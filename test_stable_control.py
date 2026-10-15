@@ -293,6 +293,62 @@ class StableWorkerTests(unittest.TestCase):
 
 
 class StableServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_canceled_old_execution_does_not_block_current_feedback(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from test_fan_snapshot import matched_fan
+        clock = [0]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(service, 'time', SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1000 + clock[0])), \
+                patch.object(service.MotorSchedule, 'load', return_value=service.MotorSchedule()):
+            app = await service.create_app(Path(directory), high_wind_gate=True)
+            state = app[service.STATE]
+            state['settings']['manual_level'] = None
+            try:
+                controller = state['controller']
+                handler = next(r.handler for r in app.router.routes() if r.resource.canonical == '/api/status')
+                actual = 10
+                for now in range(0, 64, 3):
+                    clock[0] = now
+                    decision = controller.decide(fleet(now, cpu=49, gpu=47, board=54, power=60, load=5),
+                        now, minimum_level=0, feedback=feedback(now, actual))
+                    actual = decision['level']
+                self.assertEqual(actual, 7)
+                decision = controller.protect('transient storage interruption', 64)
+                self.assertEqual(decision['level'], 9)
+                state.update(decision=decision, fan_request=service.FanRequest(9))
+                recovered = []
+                for now in range(66, 133, 3):
+                    clock[0] = now
+                    state.update(fan=matched_fan(9, now, 1000 + now), last_poll=now, last_fan=now)
+                    public = json.loads((await handler(SimpleNamespace())).body)
+                    self.assertTrue(public['fan']['confirmed'])
+                    self.assertEqual(public['fan']['level'], 9)
+                    if now == 66:
+                        state['decision']['execution_trial']['outcome'] = 'failed'
+                        self.assertTrue(json.loads((await handler(SimpleNamespace())).body)['fan']['confirmed'])
+                        state['decision']['execution_trial']['outcome'] = 'invalidated'
+                    decision = controller.decide(fleet(now, cpu=49, gpu=47, board=54, power=60, load=5),
+                        now, minimum_level=0, feedback=public['fan'])
+                    state.update(decision=decision, fan_request=service.FanRequest(decision['level']))
+                    if decision['level'] < 9:
+                        recovered.append((now, decision['level']))
+                        break
+                self.assertEqual(recovered, [(123, 6)])
+                self.assertEqual(decision['execution_trial']['status'], 'pending')
+                state.update(fan=matched_fan(6, 123, 1123), last_poll=123, last_fan=123)
+                public = json.loads((await handler(SimpleNamespace())).body)
+                self.assertFalse(public['fan']['confirmed'])
+                clock[0] = 129
+                state.update(fan=matched_fan(6, 129, 1129), last_poll=129, last_fan=129)
+                self.assertTrue(json.loads((await handler(SimpleNamespace())).body)['fan']['confirmed'])
+            finally:
+                await state['qr'].close()
+                state['disk'].shutdown(wait=True)
+                state['history_disk'].shutdown(wait=True)
+
     async def test_coupled_transport_public_request_and_recovery(self):
         import json
         import tempfile

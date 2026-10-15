@@ -1030,7 +1030,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.02)
             self.assertEqual(state['history_recording']['writes'], 0)
             self.assertEqual(state['history_recording']['failed_writes'], 1)
-            self.assertEqual(state['history_recording']['state'], 'failed')
+            self.assertEqual(state['history_recording']['state'], 'uncertain')
             self.assertTrue(state['storage_error'])
 
     async def test_post_append_failure_preserves_real_committed_history_count(self):

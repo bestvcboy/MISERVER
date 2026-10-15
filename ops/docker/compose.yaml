@@ -1,6 +1,6 @@
 services:
   thermal-control:
-    image: dgx-thermal-control:stable-control-20261015
+    image: dgx-thermal-control:stable-control-r4-20261015
     container_name: dgx-thermal-control
     pull_policy: never
     network_mode: host
