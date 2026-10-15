@@ -397,12 +397,16 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         request = self.state["fan_request"]
         self.assertEqual(request.release, service.ReleaseAuthority(16, 13, 3, 190, 250))
         debt = deepcopy(vars(self.state["motor_schedule"]))
+        policy = deepcopy(self.state["controller"]._policy)
+        workload_history = deepcopy(self.state["controller"].workload_history)
         for _ in range(20):
             status = await self.public()
             self.assertEqual(status["fan"]["level"], 16)
             self.assertFalse(status["decision"]["learning_eligible"])
             self.assertIs(self.state["fan_request"], request)
         self.assertEqual(vars(self.state["motor_schedule"]), debt)
+        self.assertEqual(self.state["controller"]._policy, policy)
+        self.assertEqual(self.state["controller"].workload_history, workload_history)
 
     async def test_monitor_real_core_requests_preserve_episode_deadline_and_accept_only_new_readback(self):
         self.state["controller"] = Controller(service.HOSTS)

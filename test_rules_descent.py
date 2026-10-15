@@ -8,6 +8,42 @@ from test_scenarios import fleet, feedback
 from test_service import FakeFan
 
 
+# Whitelisted observed CPU/GPU percentages and W, hosts 180/181/183/184, 3 second cadence.
+CAPTURED_WORKLOAD_20261015 = [[[5.4, 0.0, 59.3], [1.0, 0.0, 52.12], [1.2, 0.0, 49.29], [0.6, 0.0, 45.84]],
+ [[8.4, 0.0, 52.85], [2.4, 0.0, 56.51], [2.8, 0.0, 55.76], [1.8, 0.0, 54.67]],
+ [[6.8, 0.0, 46.99], [4.4, 0.0, 50.06], [2.9, 0.0, 42.81], [7.4, 0.0, 52.87]],
+ [[5.7, 0.0, 56.67], [2.6, 0.0, 52.16], [3.0, 0.0, 47.99], [2.8, 0.0, 48.98]],
+ [[6.0, 0.0, 48.39], [7.5, 0.0, 64.3], [3.7, 0.0, 59.26], [4.1, 0.0, 57.2]],
+ [[8.5, 0.0, 42.96], [4.4, 0.0, 50.57], [3.7, 0.0, 54.93], [7.3, 0.0, 59.74]],
+ [[7.0, 0.0, 58.73], [2.4, 0.0, 47.22], [2.9, 0.0, 45.9], [3.3, 0.0, 52.7]],
+ [[5.8, 0.0, 75.47], [1.0, 0.0, 45.34], [3.4, 0.0, 52.35], [2.6, 0.0, 42.92]],
+ [[7.0, 0.0, 54.73], [1.2, 0.0, 51.92], [6.0, 0.0, 46.46], [0.8, 0.0, 43.91]],
+ [[8.3, 0.0, 57.37], [3.6, 0.0, 56.99], [3.7, 0.0, 53.85], [3.6, 0.0, 55.11]],
+ [[4.2, 0.0, 47.72], [7.3, 0.0, 65.05], [1.2, 0.0, 57.3], [7.4, 0.0, 54.29]],
+ [[6.8, 0.0, 60.68], [2.4, 0.0, 53.91], [2.6, 0.0, 55.06], [1.1, 0.0, 50.44]],
+ [[3.7, 0.0, 59.88], [3.5, 0.0, 49.6], [5.4, 0.0, 46.45], [3.1, 0.0, 41.52]],
+ [[6.5, 0.0, 56.39], [2.3, 0.0, 47.24], [4.7, 0.0, 46.4], [2.6, 0.0, 49.39]],
+ [[10.9, 0.0, 58.15], [2.0, 0.0, 45.87], [2.2, 0.0, 41.25], [2.2, 0.0, 40.01]],
+ [[5.5, 0.0, 55.52], [0.5, 0.0, 49.86], [12.1, 0.0, 46.2], [0.7, 0.0, 45.45]],
+ [[6.3, 0.0, 59.78], [5.4, 0.0, 40.6], [3.3, 0.0, 44.18], [2.7, 0.0, 49.64]],
+ [[10.0, 0.0, 48.4], [5.4, 0.0, 46.89], [1.9, 0.0, 48.79], [1.1, 0.0, 51.31]],
+ [[7.0, 0.0, 54.52], [3.1, 0.0, 48.64], [8.6, 0.0, 60.06], [5.7, 0.0, 43.53]],
+ [[2.6, 0.0, 45.26], [5.3, 0.0, 53.53], [7.5, 0.0, 50.38], [3.3, 0.0, 51.41]],
+ [[3.4, 0.0, 52.3], [3.9, 0.0, 41.56], [2.0, 0.0, 45.54], [4.7, 0.0, 50.07]],
+ [[7.3, 0.0, 47.43], [3.0, 0.0, 41.46], [6.1, 0.0, 44.7], [5.6, 0.0, 44.37]],
+ [[9.2, 0.0, 57.76], [1.6, 0.0, 51.94], [1.9, 0.0, 46.98], [1.6, 0.0, 50.08]],
+ [[3.4, 0.0, 60.1], [1.0, 0.0, 50.74], [1.6, 0.0, 51.09], [1.0, 0.0, 47.76]],
+ [[8.4, 0.0, 42.61], [1.5, 0.0, 46.34], [3.7, 0.0, 49.69], [2.0, 0.0, 48.73]],
+ [[7.1, 0.0, 56.06], [3.8, 0.0, 44.2], [3.8, 0.0, 43.01], [3.4, 0.0, 42.47]],
+ [[3.1, 0.0, 49.58], [4.9, 0.0, 47.17], [1.8, 0.0, 50.09], [1.8, 0.0, 50.02]],
+ [[11.4, 0.0, 53.46], [2.3, 0.0, 43.59], [5.8, 0.0, 45.15], [5.2, 0.0, 48.94]],
+ [[6.4, 0.0, 52.93], [5.2, 0.0, 54.42], [5.0, 0.0, 57.78], [5.0, 0.0, 51.93]],
+ [[6.5, 0.0, 52.81], [0.5, 0.0, 46.19], [0.7, 0.0, 45.73], [0.2, 0.0, 53.0]],
+ [[3.9, 0.0, 45.42], [4.4, 0.0, 60.4], [3.8, 0.0, 51.08], [3.4, 0.0, 49.93]],
+ [[7.3, 0.0, 50.4], [2.1, 0.0, 51.77], [2.0, 0.0, 48.32], [1.9, 0.0, 44.02]],
+ [[4.8, 0.0, 55.3], [4.8, 0.0, 47.9], [2.1, 0.0, 43.78], [5.6, 0.0, 48.42]]]
+
+
 class RulesDescentTests(unittest.TestCase):
     def step(self, c, t, actual, floor=3, **values):
         return c.decide(fleet(t, cpu=values.pop('cpu',49), gpu=values.pop('gpu',47),
@@ -98,12 +134,12 @@ class RulesDescentTests(unittest.TestCase):
         self.assertEqual(d["level"],10)
         self.assertEqual(d["execution_trial"]["original_deadline"],deadline)
 
-    def test_load_change_resets_qualification_and_power_reserve_remains(self):
+    def test_single_load_sample_keeps_credit_and_raw_power_reserve_remains(self):
         c=self.prepared()
         for t in range(63,88,3):d=self.step(c,t,10)
         d=self.step(c,90,10,load=20)
         self.assertEqual(d["level"],10)
-        self.assertEqual(c._policy["state"]["earned"],0)
+        self.assertEqual(c._policy["state"]["earned"],27)
         for t in (93,96,99):d=self.step(c,t,8,power=81)
         self.assertGreaterEqual(d["level"],10)
 
@@ -134,6 +170,102 @@ class RulesDescentTests(unittest.TestCase):
             d=self.step(c,t,8,cpu=58)
             self.assertGreaterEqual(d["level"],10)
             self.assertFalse(d["learning_eligible"])
+
+    def test_captured_natural_load_jitter_qualifies_without_instantaneous_span_resets(self):
+        c=self.prepared()
+        requested=None
+        reference=None
+        for index, readings in enumerate(CAPTURED_WORKLOAD_20261015):
+            t=63+index*3
+            nodes=fleet(t,cpu=49,gpu=47,board=59,power=60)
+            for node, (cpu,gpu,power) in zip(nodes,readings):
+                node.update(cpu_load=cpu,gpu_load=gpu,power_w=power)
+            d=c.decide(nodes,t,minimum_level=3,feedback=feedback(t,10))
+            if d["level"]<10:
+                requested=t
+                break
+            if index>0:
+                self.assertIsNone(c._policy["state"].get("release_reset"))
+                self.assertEqual(c._policy["state"]["workload_reference"],reference)
+            else:
+                reference=dict(c._policy["state"]["workload_reference"])
+        self.assertEqual(requested,93)
+        self.assertEqual(d["level"],8)
+        self.assertFalse(d["learning_eligible"])
+
+    def test_sustained_mean_increases_reset_credit_with_visible_reason(self):
+        for metric in ("cpu_load","gpu_load","power_w"):
+            with self.subTest(metric=metric):
+                c=self.prepared(board=61)
+                for t in range(63,85,3):self.step(c,t,10,board=61)
+                reset=None
+                for t in range(87,118,3):
+                    nodes=fleet(t,cpu=49,gpu=47,board=61,power=60)
+                    nodes[0][metric]=75 if metric=="power_w" else 25
+                    d=c.decide(nodes,t,minimum_level=3,feedback=feedback(t,10))
+                    if "均值增加" in d["scenario_detail"]:
+                        reset=t
+                        self.assertEqual(c._policy["state"]["earned"],0)
+                        self.assertNotIn("继续观察",d["scenario_detail"])
+                        break
+                self.assertIsNotNone(reset)
+                self.assertEqual(d["level"],10)
+
+    def test_pending_sustained_mean_increase_revokes_without_extending_deadline(self):
+        for metric in ("cpu_load","gpu_load","power_w"):
+            with self.subTest(metric=metric):
+                c=self.prepared()
+                for t in range(63,94,3):d=self.step(c,t,10)
+                deadline=d["execution_trial"]["original_deadline"]
+                frozen=dict(c._policy["operation"]["reference"])
+                revoked=False
+                for t in range(96,130,3):
+                    nodes=fleet(t,cpu=49,gpu=47,board=59,power=60)
+                    nodes[0][metric]=75 if metric=="power_w" else 25
+                    d=c.decide(nodes,t,minimum_level=3,feedback=feedback(t,10,confirmed=False,execution="pending"))
+                    self.assertEqual(d["execution_trial"]["original_deadline"],deadline)
+                    self.assertEqual(c._policy["operation"]["reference"],frozen)
+                    if d["level"]>=10:
+                        revoked=True
+                        self.assertTrue(any("均值增加" in reason for reason in d["reasons"]))
+                        break
+                self.assertTrue(revoked)
+
+    def test_falling_mean_does_not_reset_credit_or_revoke_pending_jump(self):
+        c=self.prepared(load=20,power=75)
+        for t in range(63,94,3):
+            d=self.step(c,t,10,load=0,power=50)
+        self.assertEqual(d["level"],8)
+        deadline=d["execution_trial"]["original_deadline"]
+        for t in (96,99,102):
+            d=c.decide(fleet(t,cpu=49,gpu=47,board=59,power=40,load=0),t,
+                       minimum_level=3,feedback=feedback(t,10,confirmed=False,execution="pending"))
+            self.assertEqual(d["level"],8)
+            self.assertEqual(d["execution_trial"]["original_deadline"],deadline)
+
+    def test_missing_workload_coverage_resets_reference_and_reports_pause(self):
+        c=self.prepared()
+        for t in range(63,88,3):self.step(c,t,10)
+        with patch.object(c,"_workload_mean",return_value=None):d=self.step(c,90,10)
+        self.assertEqual(c._policy["state"]["earned"],0)
+        self.assertIsNone(c._policy["state"]["workload_reference"])
+        self.assertIn("覆盖缺失",d["scenario_detail"])
+        self.assertNotIn("继续观察",d["scenario_detail"])
+        d=self.step(c,93,10)
+        self.assertEqual(c._policy["state"]["earned"],0)
+
+    def test_raw_load_pause_and_source_change_do_not_wait_for_means(self):
+        c=self.prepared()
+        for t in range(63,88,3):self.step(c,t,10)
+        d=self.step(c,90,10,load=30)
+        self.assertEqual(d["level"],10)
+        self.assertIsNone(c._policy["state"]["last"])
+        nodes=fleet(93,cpu=49,gpu=47,board=59,power=60)
+        nodes[0]["power_source"]="replacement"
+        d=c.decide(nodes,93,minimum_level=3,feedback=feedback(93,10))
+        self.assertEqual(c._policy["state"]["earned"],0)
+        self.assertIsNone(c._policy["state"]["workload_reference"])
+        self.assertIn("覆盖缺失",d["scenario_detail"])
 
     def test_uncommanded_low_actual_restores_previous_request(self):
         c=self.prepared()

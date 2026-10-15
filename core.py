@@ -238,13 +238,30 @@ class Controller:
         state = self._policy["state"]
         key = (tag, frame["actual"], frame["identity"], frame["caller"], witness)
         extended = self._extend_context(state.get("context"), frame["context"],
-                                        strict=tag in ("cold_release", "graded", "rules_release"))
+                                        strict=tag in ("cold_release", "graded"))
+        reset_reason = None
         if state.get("key") != key or extended is None:
+            reset_reason = "建立新的同源观察基线"
             state = dict(tag=tag, key=key, context=frame["context"], earned=0, last=None,
                          since=frame["now"], witness=witness, confirmed_at=frame["now"])
             self._policy["state"] = state
         else:
             state["context"] = extended
+        if tag == "rules_release":
+            means = self._workload_mean(frame["now"], 30)
+            reference = state.get("workload_reference")
+            increase = self._workload_increase(reference, means)
+            if means is None:
+                reset_reason = "30秒负载覆盖缺失，重置观察信用"
+                state.update(earned=0, last=None, workload_reference=None)
+                eligible = False
+            elif reference is None:
+                state["workload_reference"] = means
+            elif increase is not None:
+                reset_reason = increase + "，重置观察信用"
+                state.update(earned=0, last=None, workload_reference=means)
+                eligible = False
+            state["release_reset"] = reset_reason
         if eligible:
             previous = state["last"]
             if previous is not None and 0 < frame["now"] - previous <= 6:
@@ -364,6 +381,19 @@ class Controller:
             means[host] = tuple(sum(b[1][index] * (b[0] - max(a[0], now - seconds))
                                    for a, b in zip(points, points[1:])) / seconds for index in range(3))
         return means
+
+    @staticmethod
+    def _workload_increase(reference, current):
+        if reference is None or current is None or reference.keys() != current.keys():
+            return "30秒负载参考或覆盖缺失"
+        for host, values in current.items():
+            for index, value in enumerate(values):
+                delta, threshold = value - reference[host][index], 15 if index < 2 else 10
+                if delta >= threshold:
+                    metric = ("CPU", "GPU", "功率")[index]
+                    unit = "个百分点" if index < 2 else "W"
+                    return f"{host} 30秒{metric}均值增加{delta:.2f}/{threshold}{unit}"
+        return None
 
     @staticmethod
     def _thermal_covered(points, now, seconds, wifi):
@@ -818,14 +848,26 @@ class Controller:
         state = self._credit("rules_release", frame, eligible)
         detail = (f"目标余量 {margin:.1f} C，安全观察 {state['earned']:g}/{required}s，"
                   f"实际{actual}档，保底{reserve}档，降档最小间隔30s")
+        if state["release_reset"]:
+            detail += "，" + state["release_reset"]
+        pauses = []
+        for active, reason in ((not valid, "温度或匹配读回证据不足"),
+                (frame["power_warning"], "即时功耗警告"), (frame["power_guard"], "持续功耗保护"),
+                (frame["load_event"], "即时负载事件"), (frame["uncertain"], "温度变化待确认"),
+                (sustained, "持续升温"), (frame["target_risk"], "目标温度风险"),
+                (margin < 3, "目标余量低于3C"), (actual <= reserve, "已达当前真实保底")):
+            if active:
+                pauses.append(reason)
+        if pauses:
+            detail += "，暂停原因：" + "、".join(pauses)
         if eligible and state["earned"] >= required and now - self.last_drop >= 30:
             destination = max(reserve, actual - step)
             self._request(destination, actual, now, frame["context"], purpose="release", profile="rules",
-                          descent_limit=actual - destination)
+                          reference=dict(state["workload_reference"]), descent_limit=actual - destination)
             policy["operation"]["release_identity"] = frame["identity"]
             return result("trial_pending", detail + f"，低温跳档请求 {actual}->{destination}，等待设备读回")
         self.level = actual
-        return result("rules_release", detail + ("，条件未满足，暂停累计" if not eligible else "，继续观察"))
+        return result("rules_release", detail + ("，暂停累计" if not eligible or state["release_reset"] else "，继续观察"))
 
     def _advance(self, frame):
         now, nodes = frame["now"], frame["nodes"]
@@ -1020,7 +1062,8 @@ class Controller:
             rules_authority_lost = (trial["profile"] == "rules" and destination < episode.original_from
                 and (confounded or not healthy or not advancing or not all(frame["complete"].values())
                      or trial.get("release_identity") != identity
-                     or self._extend_context(trial["baseline"], context) is None
+                     or self._extend_context(trial["baseline"], context, strict=False) is None
+                     or self._workload_increase(trial["reference"], means) is not None
                      or frame["margin"] < (10 if episode.planned_step == 3 else
                                            5 if episode.planned_step == 2 else 3)
                      or frame["power_warning"] or frame["power_guard"]
@@ -1028,6 +1071,9 @@ class Controller:
                      or frame["persistent_heat"] or frame["warming"]
                      or any(s["slope"] >= .02 for s in frame["evidence"].values())))
             if rules_authority_lost:
+                workload_reason = self._workload_increase(trial["reference"], means)
+                reasons.append("[rules-release] 撤销下降权限：" +
+                               (workload_reason or "来源、反馈、温度或即时负载保护条件改变"))
                 self._finish_trial("invalidated")
                 self._request(max(actual, episode.original_from, reserve), actual, now, context,
                               purpose="rollback", profile="ordinary")
