@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from core import Journal
 from learning import BUCKET, SLOT, Learning
+from test_service import publish_test_request
 from test_core import HOSTS
 from test_learning import SETTINGS, frame, populated_learning
 
@@ -84,6 +85,7 @@ class LearningStorageTests(unittest.IsolatedAsyncioTestCase):
         self.state.update(nodes=row["nodes"], updated_at=stamp, fan=row["fan"], last_poll=stamp,
                           last_fan=time.monotonic(), learning_wall=stamp,
                           decision=dict(row["decision"], level=gear, execution_trial=None))
+        publish_test_request(self.state)
         self.state["queue"].put_nowait(row)
         await asyncio.wait_for(self.state["queue"].join(), 2)
         return row

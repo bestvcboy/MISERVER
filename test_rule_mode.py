@@ -130,6 +130,7 @@ class RulesModeTests(unittest.IsolatedAsyncioTestCase):
         return row
 
     async def test_default_storage_settings_status_and_shutdown_preserve_old_learning_bytes(self):
+        self.assertTrue(self.state["controller"].rules_only)
         self.assertEqual(len(self.policy), 2)
         row = await self.write()
         self.assertEqual(self.state['history_recording']['writes'], 1)

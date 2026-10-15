@@ -12,7 +12,7 @@ let settingsDirty = false;
 let settingsSaving = false;
 let settingsUnknown = false;
 const settingsControls = ['retention', 'capacity', 'control-mode', 'settings-save', 'settings-cancel'];
-const modeOptions = [new Option('自动温控 · 常规 0 到 10 档 · 逐级至 16', 'automatic'),
+const modeOptions = [new Option('自动温控 · 按温度余量降档 · 保护至 16', 'automatic'),
   ...Array.from({length:17}, (_, level) => new Option(`手动 ${level} 档${level === 0 ? ' · 仍在运转' : ''}`, String(level)))];
 $('control-mode').replaceChildren(...modeOptions);
 $('control-mode').value = '16';
@@ -115,7 +115,7 @@ function renderLearning(learning) {
   if (learning.enabled === false) {
     $('learning-state').textContent = '纯规则自动温控 · 机器学习已暂停';
     $('learning-published').textContent = '已有学习阈值不参与控制，使用固定功耗、温度趋势和故障保护规则。';
-    $('learning-candidate').textContent = '逐级降档仍需稳定温度、有效采样和实际设备确认。';
+    $('learning-candidate').textContent = '每次降档至少间隔 30 秒；目标余量 ≥10°C 最多降 3 档，≥5°C 最多降 2 档，3–5°C 观察 60 秒降 1 档。仍需有效采样与实际设备确认。';
     $('learning-schedule').textContent = '不训练、不评估、不发布学习参数；旧学习记录保留。';
     $('learning-storage').textContent = `保留学习文件 ${numeric((learning.preserved_bytes || 0) / 1048576, 2)} MiB；容量内预留 ${numeric((learning.reserved_bytes || 0) / 1048576, 2)} MiB。原始温度、负载和风力历史继续记录。`;
     return;
@@ -218,7 +218,7 @@ function historyReadback(sample) {
 function trialDetails(decision) {
   const operation = decision?.execution_trial;
   const experiment = decision?.trial;
-  const current = operation ? ` 当前执行 ${operation.from}→${operation.to} · ${operation.status} · 请求 ${numeric(operation.requested_at, 3)} · 原截止 ${numeric(operation.original_deadline, 3)} · 目的请求 ${numeric(operation.destination_requested_at, 3)}。` : '';
+  const current = operation ? ` 当前执行 ${operation.from}→${operation.to} · ${operation.status} · ${operation.to < operation.from ? `计划下降 ${operation.planned_step || 1} 档` : '上调请求'} · 请求 ${numeric(operation.requested_at, 3)} · 原截止 ${numeric(operation.original_deadline, 3)} · 目的请求 ${numeric(operation.destination_requested_at, 3)}。` : '';
   const previous = experiment ? ` 下降试验 ${experiment.from}→${experiment.to} · ${experiment.outcome || experiment.status}。` : '';
   return current + previous;
 }

@@ -51,8 +51,8 @@ class HistoryUITests(unittest.TestCase):
         for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', 'CPU / GPU <b>60°C</b>'):
             self.assertNotIn(retired, html)
         for policy in ('CPU / GPU 60°C 准备至少 10 档', '70°C 且当前可信持续上升',
-                       '绝对硬线为 75°C', '73°C 实温预缓冲', '≤45°C 进入、>47°C 退出',
-                       '30 秒有效证据后相邻降档', '不计容量学习'):
+                       '绝对硬线为 75°C', '73°C 实温预缓冲', '≥10°C 观察 30 秒最多降 3 档',
+                       '≥5°C 观察 30 秒最多降 2 档', '3–5°C 观察 60 秒降 1 档', '不计容量学习'):
             self.assertIn(policy, html)
 
     def test_ambient_history_projects_public_fields_and_preserves_raw_monotonic(self):
@@ -115,9 +115,14 @@ assert.equal(get('actual').textContent, '8 档');
 assert.equal(get('execution').textContent, '最新请求待执行');
 context.status.decision.trial = {from:5, to:4, status:'invalidated', outcome:'invalidated', requested_at:90};
 context.status.decision.execution_trial = {from:4, to:10, status:'pending', outcome:null,
-  requested_at:96, original_deadline:156, destination_requested_at:96};
+  requested_at:96, original_deadline:156, destination_requested_at:96, planned_step:2};
 evaluate('render(status)');
-assert.match(get('policy-detail').textContent, /当前执行 4→10 · pending.*原截止 156.000.*下降试验 5→4 · invalidated/);
+assert.match(get('policy-detail').textContent, /当前执行 4→10 · pending.*上调请求.*原截止 156.000.*下降试验 5→4 · invalidated/);
+assert.ok(!get('policy-detail').textContent.includes('计划下降'));
+Object.assign(context.status.decision.execution_trial, {from:10, to:8, planned_step:2});
+evaluate('render(status)');
+assert.match(get('policy-detail').textContent, /当前执行 10→8 · pending.*计划下降 2 档/);
+Object.assign(context.status.decision.execution_trial, {from:4, to:10});
 context.status.decision.execution_trial.status = 'confirmed';
 evaluate('render(status)');
 assert.match(get('policy-detail').textContent, /当前执行 4→10 · confirmed/);
@@ -356,7 +361,7 @@ assert.match(get('history-samples').innerHTML, /没有记录/);
 assert.match(html, /type="datetime-local" step="1"/);
 assert.equal((html.match(/<th scope="col">/g) || []).length, 11);
 assert.match(html, /class="history-scroll" role="region" tabindex="0"/);
-assert.match(get('control-mode').children[0].textContent, /常规 0 到 10/);
+assert.match(get('control-mode').children[0].textContent, /按温度余量降档/);
 const response = (marker) => ({ok:true, json:async()=>({rows:[], samples:[{...sample, decision:{reasons:[marker]}}], samples_truncated:false, from:0, to:100})});
 (async()=>{
   const first = evaluate('history()');

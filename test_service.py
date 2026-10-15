@@ -17,10 +17,14 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from service import (DEVICE_ID, DEVICE_IP, DEVICE_MAC, DEVICE_MODEL, MOTOR_IDENTITY, STATE,
-                     MotorSchedule, atomic_write, create_app, device_from_token,
+                     FanRequest, MotorSchedule, atomic_write, create_app, device_from_token,
                      fan_apply, settings_checked, trusted_peer, drain_owned, settings_from_disk)
 from qr_connector import QRConnector, Phase, TARGET, START_CONSENT, BIND_CONSENT
 from test_qr_connector import FakeCloud, OWNER
+
+def publish_test_request(state):
+    state["fan_request"] = FanRequest(state["decision"]["level"])
+
 
 class SettingsSchemaTests(unittest.TestCase):
     def test_canonical_strict_range_and_disk_only_migration(self):
@@ -964,7 +968,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNone(state["settings_task"])
                         self.assertTrue(running_task.done())
                         self.assertTrue(tasks_drained.is_set())
-                        self.assertEqual(final_attempts, [16])
+                        self.assertEqual(final_attempts, [FanRequest(16, protected=True)])
                         for key in ("disk",):
                             with self.assertRaises(RuntimeError):
                                 state[key].submit(lambda: None)
@@ -1074,6 +1078,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((physical["execution"], physical["confirmed"]), ("matched", True))
                         mono, wall = raw["learning"]["mono"], raw["snapshot_at"]
                         state.update(fan=physical, decision=deepcopy(raw["decision"]), last_poll=mono, last_fan=mono)
+                        publish_test_request(state)
                         before, debt = deepcopy(physical), deepcopy(vars(state["motor_schedule"]))
                         response = await self.client.get("/api/status", headers=self.headers)
                         self.assertEqual(response.status, 200)
@@ -1157,6 +1162,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 state.update(fan=physical, decision=dict(level=physical["level"], execution_trial=None),
                     nodes=nodes, stop=False, last_poll=mono, last_fan=mono, learning_wall=wall,
                     learning=dict(published=policy, settings_revision=state["settings_revision"], error=""))
+                publish_test_request(state)
                 state["queue"] = asyncio.Queue()
                 debt = deepcopy(vars(state["motor_schedule"]))
                 with patch("service.time", SimpleNamespace(monotonic=lambda: mono, time=lambda: wall)), \
@@ -1502,6 +1508,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(row["snapshot_at"], row["fan"]["verified_at"])
             before = json.dumps(row)
             state["decision"]["level"] = 16
+            publish_test_request(state)
             state["decision"]["reasons"].append("later reason")
             state["decision"]["rise_c_per_min"].clear()
             state["fan"]["level"] = 7
@@ -1766,6 +1773,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state = self.app[STATE]
         state["settings"]["manual_level"] = None
         state["decision"]["level"] = 10
+        publish_test_request(state)
         state["controller"].cool_since = 0
         state["fan"] = {"confirmed": True, "verified_at": time.time() - 100, "error": ""}
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
@@ -1894,6 +1902,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state = self.app[STATE]
         state["settings"]["manual_level"] = None
         state["decision"]["level"] = state["controller"].level = 10
+        publish_test_request(state)
         state["controller"].cool_since = 123
         device = FakeFan()
         schedule = state["motor_schedule"]
@@ -1928,6 +1937,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 state["stop"] = False
                 state["settings"]["manual_level"] = None
                 state["decision"]["level"] = state["controller"].level = 15
+                publish_test_request(state)
                 state["controller"].cool_since = 123
                 state["last_poll"] = state["last_fan"] = state["last_identity"] = now
                 actual = 16 if expired else 14
@@ -1962,6 +1972,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 return super().send(command, properties)
         state["settings"]["manual_level"] = None
         state["decision"]["level"] = state["controller"].level = 15
+        publish_test_request(state)
         state["controller"].cool_since = 123
         state["device"] = SlowRead()
         state["last_poll"] = state["last_fan"] = state["last_identity"] = 100
@@ -1994,6 +2005,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                        {"observed_mono": time.monotonic() + 10}):
             state["settings"]["manual_level"] = None
             state["decision"]["level"] = state["controller"].level = 10
+            publish_test_request(state)
             state["controller"].cool_since = 123
             state["fan"] = {**healthy, **change}
             state["last_fan"] = state["last_poll"] = time.monotonic()
@@ -2004,6 +2016,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state["fan"] = healthy
         state["motor_schedule"].fault = True
         state["decision"]["level"] = 10
+        publish_test_request(state)
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
         self.assertEqual((await response.json())["requested_level"], 16)
 

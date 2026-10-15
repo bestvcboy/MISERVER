@@ -267,12 +267,56 @@ class ReadbackEpisode:
             self.published = ReadbackAssessment()
 
 
+@dataclass(frozen=True)
+class ReleaseAuthority:
+    from_level: int
+    destination: int
+    max_drop: int
+    requested_at: float
+    original_deadline: float
+
+
+@dataclass(frozen=True)
+class FanRequest:
+    level: int
+    protected: bool = False
+    release: ReleaseAuthority | None = None
+    read_only_floor: int | None = None
+
+
 def fan_apply(device, wanted, schedule, *, read_only=None):
     def target():
-        level = wanted()
-        if type(level) is not int or not 0 <= level <= MAX_LEVEL:
+        value = wanted()
+        request = value if isinstance(value, FanRequest) else FanRequest(value)
+        if type(request.level) is not int or not 0 <= request.level <= MAX_LEVEL:
             raise ValueError("请求档位必须为 0 到 16 的整数")
-        return level
+        return request
+
+    def destination(request):
+        if request.read_only_floor is not None:
+            return max(request.level, actual[2])
+        step, authority = 1, request.release
+        if (isinstance(authority, ReleaseAuthority)
+                and type(authority.original_deadline) in (int, float)
+                and math.isfinite(authority.original_deadline)
+                and time.monotonic() >= authority.original_deadline):
+            return max(request.level, actual[2])
+        if (not request.protected and isinstance(authority, ReleaseAuthority)
+                and authority == original_release
+                and all(type(value) is int for value in
+                        (authority.from_level, authority.destination, authority.max_drop))
+                and authority.max_drop in (2, 3) and authority.destination == request.level
+                and authority.from_level == actual[2] and running
+                and 0 < authority.from_level - request.level <= authority.max_drop
+                and all(type(value) in (int, float) and math.isfinite(value) for value in
+                        (authority.requested_at, authority.original_deadline))
+                and 0 <= time.monotonic() - authority.requested_at < 60
+                and authority.original_deadline == authority.requested_at + 60
+                and time.monotonic() < authority.original_deadline):
+            step = authority.max_drop
+        if request.protected and request.level < actual[2]:
+            return actual[2]
+        return max(request.level, actual[2] - step) if request.level < actual[2] else request.level
 
     def readback():
         actual = device.send("get_prop", ["power", "mode", "favorite_level", "motor1_speed", "temp_dec"])
@@ -285,7 +329,9 @@ def fan_apply(device, wanted, schedule, *, read_only=None):
             raise ValueError("设备未返回有效完整状态")
         return actual, observed_mono, observed_wall
 
-    level = target()
+    request = target()
+    original_release = request.release
+    level = request.level
     result = {"configured": True, "confirmed": False, "level": None, "rpm": None,
               "power": None, "mode": None, "execution": "pending", "attempts": schedule.attempts,
               "fault": schedule.fault, "error": "", "observed_mono": None,
@@ -319,14 +365,16 @@ def fan_apply(device, wanted, schedule, *, read_only=None):
                 or isinstance(error, DeviceException) and isinstance(error.__cause__, OSError)):
             result["readback_failure"] = "initial_transport"
         return finish("设备读回未知，保持只读，不盲目开机或切换模式", "fault" if schedule.fault else "pending")
-    level = target()
+    request = target()
+    level = request.level
     running = observed(actual, observed_mono, observed_wall)
     if running and actual[2] == level and (not schedule.persistence_error or level == MAX_LEVEL):
         if (schedule.attempts or schedule.expected_level is not None or schedule.fault or schedule.persistence_error) and not schedule.persist_debt_then_set_budget(0, None):
             return finish(execution="fault")
         result["confirmed"] = True
         return finish(execution="matched")
-    observation_floor = read_only() if read_only is not None else None
+    observation_floor = (request.read_only_floor if request.read_only_floor is not None else
+                         read_only() if read_only is not None else None)
     if type(observation_floor) is int:
         if not running or actual[2] != observation_floor:
             return finish("恢复读回与上次确认状态不一致，停止本次写入并请求保护", "fault")
@@ -347,7 +395,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None):
     if actual[:3] == ["on", "favorite", level]:
         return finish("档位已匹配，等待正转速读回")
     latest = target()
-    level = max(latest, actual[2] - 1) if latest < actual[2] else latest
+    level = destination(latest)
     if level < actual[2] and now - schedule.last_decrease < 30:
         return finish("距离上次执行降档不足三十秒，最新请求待执行")
     if actual[:3] == ["on", "favorite", level]:
@@ -374,7 +422,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None):
             mutate(device.set_mode, OperationMode.Favorite)
         while True:
             latest = target()
-            next_level = max(latest, actual[2] - 1) if latest < actual[2] else latest
+            next_level = destination(latest)
             level = max(level, next_level)
             if level < actual[2] and time.monotonic() - schedule.last_decrease < 30:
                 level = actual[2]
@@ -389,7 +437,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None):
         running = observed(actual, observed_mono, observed_wall)
     except Exception:
         return finish("修正未获完整确认，已计入尝试预算，等待观察间隔")
-    if running and actual[2] == target():
+    if running and actual[2] == target().level:
         if not schedule.persist_debt_then_set_budget(0, None):
             return finish(execution="fault")
         result["confirmed"] = True
@@ -462,13 +510,14 @@ async def create_app(root, origins=None, *, learning_enabled=False):
              "settings_error": "", "settings_task": None,
              "dropped_records": 0, "log_bytes": 0, "last_poll": time.monotonic(),
              "last_fan": time.monotonic(), "updated_at": None, "stop": False,
-             "controller": Controller(HOSTS), "device": None, "fan_lock": asyncio.Lock(),
+             "controller": Controller(HOSTS, rules_only=not learning_enabled), "device": None, "fan_lock": asyncio.Lock(),
              "pair_lock": asyncio.Lock(), "pairing": False,
              "journal": Journal(root / "logs"), "queue": asyncio.Queue(maxsize=2),
              "disk": ThreadPoolExecutor(max_workers=1), "history_lock": asyncio.Lock(),
              "history_disk": ThreadPoolExecutor(max_workers=1),
              "root": root, "force_max": False, "last_identity": 0,
              "motor_schedule": motor_schedule, "settings_revision": 0,
+             "fan_request": FanRequest(MAX_LEVEL, protected=True),
              "learning": {}, "learning_wall": None, "learning_mono": None,
              "history_recording": {"source": "control", "state": "starting", "writes": 0,
                  "failed_writes": 0, "last_timestamp": None, "error": None}}
@@ -523,6 +572,7 @@ async def create_app(root, origins=None, *, learning_enabled=False):
     def protect(reason="服务或执行条件异常，重新建立全风保护基线"):
         decision = state["controller"].protect(reason)
         state["decision"].update(decision)
+        state["fan_request"] = FanRequest(MAX_LEVEL, protected=True)
         return decision
 
     def fan_healthy():
@@ -539,13 +589,33 @@ async def create_app(root, origins=None, *, learning_enabled=False):
                 and 0 <= time.monotonic() - state["last_fan"] <= 9)
 
     def request_snapshot():
+        base = state["fan_request"]
         hold = readback_hold(time.monotonic())
         protected = bool(state["force_max"] or state["storage_error"]
                 or state["settings_error"] or state["pairing"] or state["settings_task"] is not None
                 or time.monotonic() - state["last_poll"] > 6 or not fan_healthy() and hold is None)
-        return (MAX_LEVEL if protected else
-                max(state["decision"]["level"], state["settings"]["manual_level"] or 0,
-                    hold.hold_level if hold else 0)), protected
+        if protected:
+            return FanRequest(MAX_LEVEL, protected=True)
+        level = max(base.level, state["settings"]["manual_level"] or 0,
+                    hold.hold_level if hold else 0)
+        if hold is not None:
+            return FanRequest(level, read_only_floor=hold.hold_level if level < MAX_LEVEL else None)
+        release = (base.release if base.level == level and not base.protected
+                   and state["settings"]["manual_level"] is None else None)
+        return FanRequest(level, release=release)
+
+    def publish_request(decision, now):
+        trial = decision.get("execution_trial") or {}
+        authority = None
+        if (not learning_enabled and state["settings"]["manual_level"] is None
+                and trial.get("status") == "pending" and trial.get("profile") == "rules"
+                and trial.get("purpose") == "release" and trial.get("planned_step") in (2, 3)
+                and trial.get("original_to") == trial.get("to") == decision["level"]
+                and trial.get("requested_at") == trial.get("destination_requested_at")
+                and now < trial.get("original_deadline", -math.inf)):
+            authority = ReleaseAuthority(trial["original_from"], trial["to"], trial["planned_step"],
+                                         trial["requested_at"], trial["original_deadline"])
+        state["fan_request"] = FanRequest(decision["level"], release=authority)
 
     def readback_hold(now):
         schedule = state["motor_schedule"]
@@ -565,7 +635,7 @@ async def create_app(root, origins=None, *, learning_enabled=False):
         return hold
 
     def wanted():
-        return request_snapshot()[0]
+        return request_snapshot().level
 
     def current_fan(requested_level):
         observed = dict(state["fan"])
@@ -876,6 +946,7 @@ async def create_app(root, origins=None, *, learning_enabled=False):
                         or state["pairing"] or state["settings_task"] is not None):
                     decision.update(protect())
                 state.update(nodes=nodes, decision=decision, last_poll=now, updated_at=wall)
+                publish_request(decision, now)
                 requested_level = wanted()
                 row_power_thresholds = active_power(nodes, now, wall) if learning_enabled else {}
                 row = {"ts": wall, "snapshot_at": time.time(), "nodes": nodes,
@@ -1029,14 +1100,10 @@ async def create_app(root, origins=None, *, learning_enabled=False):
             interrupted = False
             def target():
                 nonlocal interrupted
-                level, protected = request_snapshot()
-                interrupted = interrupted or protected
-                return level
-            def observation_only():
-                hold = readback_hold(time.monotonic())
-                level, protected = request_snapshot()
-                return hold.hold_level if hold is not None and not protected and level < MAX_LEVEL else None
-            result = fan_apply(device, target, state["motor_schedule"], read_only=observation_only)
+                request = request_snapshot()
+                interrupted = interrupted or request.protected
+                return request
+            result = fan_apply(device, target, state["motor_schedule"])
             result["protection_interrupted"] = result.get("protection_interrupted", False) or interrupted
             return result
         return await drain_owned(asyncio.to_thread(execute))

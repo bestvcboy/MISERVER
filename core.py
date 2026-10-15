@@ -117,6 +117,7 @@ class _Episode:
     original_to: int
     original_requested_at: float
     original_deadline: float
+    planned_step: int = 1
 
 
 class Controller:
@@ -135,7 +136,8 @@ class Controller:
     search_since = _PolicyField()
     gear_window = _PolicyField()
 
-    def __init__(self, hosts):
+    def __init__(self, hosts, *, rules_only=False):
+        self._rules_only = bool(rules_only)
         self.hosts = set(hosts)
         self._policy = dict(level=MAX_LEVEL, phase="protect", trial=None, baseline=None,
                             mode=None, operation=None, last_feedback=-math.inf, last_drop=-math.inf,
@@ -154,6 +156,10 @@ class Controller:
         self.workload_history = {}
         self.workload_context = None
         self.power_exposure = {}
+
+    @property
+    def rules_only(self):
+        return self._rules_only
 
     @property
     def upward(self):
@@ -187,7 +193,7 @@ class Controller:
                 observation["guard_safe"] = False
                 observation.pop("noise_pending", None)
 
-    def _request(self, destination, actual, now, context, *, purpose, profile, reference=None):
+    def _request(self, destination, actual, now, context, *, purpose, profile, reference=None, descent_limit=1):
         operation = self._policy["operation"]
         if (self._policy["startup_required"] and operation is not None
                 and operation["outcome"] == "execution_timeout"):
@@ -206,9 +212,9 @@ class Controller:
         if destination == actual:
             self.level = destination
             return
-        episode = _Episode(actual, destination, now, now + 60)
+        episode = _Episode(actual, destination, now, now + 60, descent_limit)
         operation = dict(from_=actual, to=destination, kind="probe" if purpose == "probe" else "release",
-                          purpose=purpose, profile=profile, requested_at=now, confirmed_at=None,
+                          purpose=purpose, profile=profile, planned_step=episode.planned_step, requested_at=now, confirmed_at=None,
                           status="pending", outcome=None, observation_elapsed=None, elapsed=0,
                           deadline=episode.original_deadline, original_deadline=episode.original_deadline,
                           episode=episode, destination=destination,
@@ -232,7 +238,7 @@ class Controller:
         state = self._policy["state"]
         key = (tag, frame["actual"], frame["identity"], frame["caller"], witness)
         extended = self._extend_context(state.get("context"), frame["context"],
-                                        strict=tag in ("cold_release", "graded"))
+                                        strict=tag in ("cold_release", "graded", "rules_release"))
         if state.get("key") != key or extended is None:
             state = dict(tag=tag, key=key, context=frame["context"], earned=0, last=None,
                          since=frame["now"], witness=witness, confirmed_at=frame["now"])
@@ -253,6 +259,9 @@ class Controller:
         trial = None if diagnostic is None else {key: diagnostic[key] for key in
             ("from", "to", "kind", "status", "observation_elapsed", "outcome", "deadline", "elapsed")}
         if trial is not None:
+            trial["planned_step"] = diagnostic.get("planned_step", 1)
+            trial["profile"] = diagnostic.get("profile")
+            trial["purpose"] = diagnostic.get("purpose")
             for key in ("requested_at", "original_deadline", "destination_requested_at"):
                 value = diagnostic.get("requested_at" if key == "destination_requested_at" and not execution else key)
                 if type(value) in (int, float) and math.isfinite(value):
@@ -710,7 +719,7 @@ class Controller:
                 witness = (host, sensor["id"], sensor["group"])
                 evidence[witness] = dict(temp=temp, target=target, hard=hard, rise=coherent,
                                          fall=falling, covered=covered, projected=accepted,
-                                         group=group, slope=slope)
+                                         group=group, slope=slope, persistent_heat=sensor_drift or confirmed_warming)
                 if (temp >= hard - 2 or coherent > 0 and accepted >= hard
                         or group in ("cpu", "gpu") and temp >= 70 and coherent > 0):
                     thermal_risk = True
@@ -752,6 +761,71 @@ class Controller:
         if telemetry_fault or thermal_risk or wifi_gap:
             self.power_exposure.clear()
         return self._advance(frame)
+
+    def _advance_rules(self, frame, *, reserve, valid, matched, advancing, changed, continuity_lost):
+        now, actual = frame["now"], frame["actual"]
+        policy, evidence = self._policy, frame["evidence"]
+        def result(tag, detail):
+            self.phase = "hold"
+            policy["learning_window"].clear()
+            policy["learning_key"] = None
+            return self._decision(tag, detail, frame["reasons"], frame["slopes"], frame["complete"], False)
+
+        edge = policy["last_downward"]
+        comparable = (edge is not None and edge["edge"][1] == actual
+            and edge["identity"] == frame["identity"] and edge["caller"] == frame["caller"]
+            and self._extend_context(edge["context"], frame["context"], strict=False) is not None)
+        danger = any(s["covered"] and s["projected"] >= s["target"] - 2
+                     for s in evidence.values())
+        risen = (comparable and any(
+            s["persistent_heat"] and s["temp"] - edge["reference"].get((key[0], key[1]), s["temp"]) > 2
+            for key, s in evidence.items()))
+        if comparable and (danger or risen):
+            self._finish_trial("failed")
+            self._request(max(actual, edge["edge"][0], reserve), actual, now, frame["context"],
+                          purpose="rollback", profile="ordinary")
+            return result("recovery", "同源持续升温接近目标，恢复先前实际确认的安全风力")
+        if actual != self.level:
+            self._request(max(actual, self.level, reserve), actual, now, frame["context"],
+                          purpose="reserve", profile="ordinary")
+            policy["state"] = dict(tag="hold")
+            return result("recovery", "实际档位偏离先前确认请求，停止下降并恢复至少先前安全风力")
+        if reserve > actual:
+            self._request(reserve, actual, now, frame["context"], purpose="reserve", profile="ordinary")
+            return result("graded_pending", f"当前真实保底要求{reserve}档，等待匹配读回")
+        if frame["deficits"]:
+            witness = policy["state"].get("witness")
+            witness = witness if witness in frame["deficits"] else min(frame["deficits"])
+            state = self._credit("graded", frame, valid, witness=witness)
+            if state["earned"] >= 30 and valid and actual < MAX_LEVEL:
+                self._request(actual + 1, actual, now, frame["context"], purpose="graded", profile="ordinary")
+            return result("graded_pending" if self._pending() else "graded_hold",
+                          f"同一传感器持续不足 {state['earned']:g}/30s，实际{actual}档")
+        reset = (changed or continuity_lost or not valid or actual != self.level)
+        if reset:
+            policy["state"] = dict(tag="rules_release")
+        sustained = frame["warming"] or frame["persistent_heat"] or any(
+            s["slope"] >= .02 for s in evidence.values())
+        eligible = (valid and matched and advancing and not reset and bool(evidence)
+            and all(s["covered"] for s in evidence.values()) and self._workload_mean(now, 30) is not None
+            and not frame["power_warning"] and not frame["power_guard"] and not frame["load_event"]
+            and not frame["target_risk"] and not frame["uncertain"] and not sustained)
+        margin = frame["margin"]
+        required, step = (30, 3) if margin >= 10 else (30, 2) if margin >= 5 else (60, 1)
+        if frame["manual"] is not None:
+            step = 1
+        eligible = eligible and margin >= 3 and actual > reserve
+        state = self._credit("rules_release", frame, eligible)
+        detail = (f"目标余量 {margin:.1f} C，安全观察 {state['earned']:g}/{required}s，"
+                  f"实际{actual}档，保底{reserve}档，降档最小间隔30s")
+        if eligible and state["earned"] >= required and now - self.last_drop >= 30:
+            destination = max(reserve, actual - step)
+            self._request(destination, actual, now, frame["context"], purpose="release", profile="rules",
+                          descent_limit=actual - destination)
+            policy["operation"]["release_identity"] = frame["identity"]
+            return result("trial_pending", detail + f"，低温跳档请求 {actual}->{destination}，等待设备读回")
+        self.level = actual
+        return result("rules_release", detail + ("，条件未满足，暂停累计" if not eligible else "，继续观察"))
 
     def _advance(self, frame):
         now, nodes = frame["now"], frame["nodes"]
@@ -844,7 +918,7 @@ class Controller:
         def result(tag, text, eligible=False):
             window = policy["learning_window"]
             key = (actual, identity, caller)
-            strict = (eligible and valid and frame["low_load"] and frame["manual"] is None
+            strict = (not self.rules_only and eligible and valid and frame["low_load"] and frame["manual"] is None
                       and not changed and not frame["power_guard"] and not frame["power_warning"] and not frame["load_event"]
                       and not frame["warming"] and not frame["persistent_heat"]
                       and actual == self.level and not self._pending() and not policy["cold_band"])
@@ -943,7 +1017,21 @@ class Controller:
                 and destination < episode.original_from
                 and (not frame["cold"] or not frame["low_load"] or frame["warming"]
                      or frame["persistent_heat"] or frame["uncertain"] or frame["load_event"]))
-            if reserve > destination:
+            rules_authority_lost = (trial["profile"] == "rules" and destination < episode.original_from
+                and (confounded or not healthy or not advancing or not all(frame["complete"].values())
+                     or trial.get("release_identity") != identity
+                     or self._extend_context(trial["baseline"], context) is None
+                     or frame["margin"] < (10 if episode.planned_step == 3 else
+                                           5 if episode.planned_step == 2 else 3)
+                     or frame["power_warning"] or frame["power_guard"]
+                     or frame["target_risk"] or frame["uncertain"] or frame["load_event"]
+                     or frame["persistent_heat"] or frame["warming"]
+                     or any(s["slope"] >= .02 for s in frame["evidence"].values())))
+            if rules_authority_lost:
+                self._finish_trial("invalidated")
+                self._request(max(actual, episode.original_from, reserve), actual, now, context,
+                              purpose="rollback", profile="ordinary")
+            elif reserve > destination:
                 self._request(max(actual, reserve), actual, now, context, purpose="reserve", profile="ordinary")
             elif (cold_authority_lost or frame["target_risk"] and
                     (trial["purpose"] == "probe" or trial["purpose"] == "release"
@@ -974,7 +1062,8 @@ class Controller:
                 self.level = actual
                 policy["state"] = dict(tag="hold")
                 if downward:
-                    policy["last_downward"] = dict(edge=(episode.original_from, actual), reference=temperatures,
+                    policy["last_downward"] = dict(edge=(episode.original_from, actual),
+                        reference=trial["temperatures"] if trial["profile"] == "rules" else temperatures,
                         context=context, identity=identity, caller=caller, rebound_done=confounded)
                 if confounded:
                     policy["cold_band"] = False
@@ -987,10 +1076,12 @@ class Controller:
                       and actual == episode.original_to and trial["attribution"] == "comparable"):
                     outcome = "manual_complete" if trial["profile"] == "manual" and actual < 10 else "recovery_released"
                     self._finish_trial(outcome)
-                    self.gear_window = dict(level=actual, since=now, context=context, reference=means)
+                    self.gear_window = (None if trial["profile"] == "rules" else
+                                        dict(level=actual, since=now, context=context, reference=means))
                     self.recovery_since = now
                     self.phase = "hold"
-                    self._credit("cold_release" if trial["profile"] == "cold" else "recovery", frame, valid)
+                    self._credit("rules_release" if trial["profile"] == "rules" else
+                                 "cold_release" if trial["profile"] == "cold" else "recovery", frame, valid)
                     return result("recovery_released", f"实际确认{trial['from']}->{actual}，恢复观察，不是容量证明")
                 else:
                     self.phase = "hold"
@@ -1023,11 +1114,15 @@ class Controller:
                               f"启动新基线 earned={state['earned']:g}/30s，完整匹配确认后才允许下降")
             policy["startup_required"], policy["protect_cause"] = False, None
             policy["state"] = dict(tag="hold")
-            if actual > max(MIN_LEVEL, reserve) and now - self.last_drop >= 30:
+            if not self.rules_only and actual > max(MIN_LEVEL, reserve) and now - self.last_drop >= 30:
                 profile = "cold" if frame["cold"] and frame["low_load"] and not frame["warming"] else "ordinary"
                 policy["cold_band"] = profile == "cold"
                 self._request(actual - 1, actual, now, context, purpose="release", profile=profile)
                 return result("trial_pending", f"启动证据30s完成，相邻请求{actual - 1} deadline={now + 60:g}")
+
+        if self.rules_only:
+            return self._advance_rules(frame, reserve=reserve, valid=valid, matched=matched,
+                                       advancing=advancing, changed=changed, continuity_lost=continuity_lost)
 
         trial = self.trial
         active_probe = trial is not None and trial["kind"] == "probe" and trial["outcome"] is None

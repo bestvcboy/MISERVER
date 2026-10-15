@@ -11,7 +11,7 @@ from unittest.mock import patch
 import service
 from core import Controller, normalize
 from learning import Learning, context_of
-from test_service import FakeFan
+from test_service import FakeFan, publish_test_request
 
 
 def matched_fan(level=16, mono=99, wall=999):
@@ -75,6 +75,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 return super().send(command, properties)
         self.state.update(fan=matched_fan(8), decision=dict(level=8, reasons=[], scenario="hold"),
                           device=MissingOnce(["on", "favorite", 8, 1500]), last_identity=self.mono)
+        publish_test_request(self.state)
         self.state["controller"].level = 8
         self.state["controller"]._policy["startup_required"] = False
         startup = self.app.on_startup[-1]
@@ -111,6 +112,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 raise TimeoutError("one missing reply")
         self.state.update(fan=matched_fan(8), decision=dict(level=8, reasons=[], scenario="hold"),
                           device=Missing(), last_identity=self.mono)
+        publish_test_request(self.state)
         self.state["controller"].level = 8
         self.state["controller"]._policy["startup_required"] = False
         startup = self.app.on_startup[-1]
@@ -209,6 +211,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 self.mono, self.wall = row["learning"]["mono"], row["snapshot_at"]
                 self.state.update(fan=deepcopy(row["fan"]), decision=deepcopy(row["decision"]),
                                   last_fan=self.mono, last_poll=self.mono)
+                publish_test_request(self.state)
                 physical, decision = deepcopy(self.state["fan"]), deepcopy(self.state["decision"])
                 debt = deepcopy(vars(self.state["motor_schedule"]))
                 result = await self.public()
@@ -227,6 +230,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             self.mono = now
             self.state.update(decision=controller._decision("trial_pending", "retarget"),
                               fan=matched_fan(target, now - 1), last_poll=now, last_fan=now)
+            publish_test_request(self.state)
             physical = deepcopy(self.state["fan"])
             result = await self.public()
             self.assertEqual(result["requested_level"], target)
@@ -247,6 +251,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(trial=trial):
                 self.state.update(fan=matched_fan(15),
                     decision=dict(level=15, execution_trial=trial, trial=execution(15, 90)))
+                publish_test_request(self.state)
                 physical = deepcopy(self.state["fan"])
                 result = await self.public()
                 self.assert_evidence(result["fan"], physical)
@@ -254,11 +259,13 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(observation=stamp):
                 self.state.update(fan=matched_fan(16, stamp),
                                   decision=dict(level=16, execution_trial=execution(16, 98)))
+                publish_test_request(self.state)
                 result = await self.public()
                 self.assertEqual(result["requested_level"], 16)
                 self.assertIs(result["fan"]["confirmed"], False)
                 self.assertEqual(result["fan"]["execution"], "pending")
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15, 98)))
+        publish_test_request(self.state)
         self.assertEqual((await self.public())["fan"], self.state["fan"])
 
     async def test_status_never_upgrades_pending_fault_unknown_or_completed_old_ack(self):
@@ -267,11 +274,13 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 physical = dict(matched_fan(15), execution=outcome, confirmed=False,
                                 fault=outcome == "fault")
                 self.state.update(fan=physical, decision=dict(level=15, execution_trial=execution(15, 98)))
+                publish_test_request(self.state)
                 result = await self.public()
                 self.assertEqual(result["fan"], physical)
                 self.assertIs(result["fan"]["confirmed"], False)
         self.state.update(fan=matched_fan(15), decision=dict(level=15,
             execution_trial=dict(execution(15, 100), status="confirmed"), trial=execution(15, 90)))
+        publish_test_request(self.state)
         self.assert_evidence((await self.public())["fan"], deepcopy(self.state["fan"]))
 
     async def test_status_no_episode_baseline_and_existing_same_actual_request_are_valid(self):
@@ -282,6 +291,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                     controller._request(gear, gear, 100, None, purpose="reserve", profile="ordinary")
                     self.assertIsNone(controller._decision("hold", "same actual")["execution_trial"])
                     self.state.update(fan=matched_fan(gear), decision=dict(level=gear, **metadata))
+                    publish_test_request(self.state)
                     result = await self.public()
                     self.assertEqual(result["requested_level"], gear)
                     self.assertEqual(result["fan"], self.state["fan"])
@@ -295,6 +305,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                         dict(verified_at=990), dict(verified_at=1001)):
             with self.subTest(changes=changes):
                 self.state.update(fan=dict(matched_fan(16), **changes), decision=dict(level=15))
+                publish_test_request(self.state)
                 physical = deepcopy(self.state["fan"])
                 result = await self.public()
                 self.assert_evidence(result["fan"], physical)
@@ -302,6 +313,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 if changes != dict(fault=None):
                     self.assertEqual(result["requested_level"], 16)
         self.state.update(fan=matched_fan(16), decision=dict(level=15))
+        publish_test_request(self.state)
         self.state["motor_schedule"].fault = True
         result = await self.public()
         self.assertEqual(result["requested_level"], 16)
@@ -310,6 +322,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_monitor_projects_feedback_before_decide_and_does_not_sanitize_bad_faults(self):
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15)))
+        publish_test_request(self.state)
         physical = deepcopy(self.state["fan"])
         with patch.object(self.state["controller"], "decide", wraps=self.state["controller"].decide) as decide:
             row = await self.sample()
@@ -319,6 +332,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         for fault in (None, "unknown", True):
             self.state.update(fan=dict(matched_fan(16), fault=fault),
                               decision=dict(level=16), last_poll=self.mono)
+            publish_test_request(self.state)
             with patch.object(self.state["controller"], "decide", return_value=dict(level=16)) as decide:
                 await self.sample()
             self.assertEqual(decide.call_args.kwargs["feedback"]["fault"], fault)
@@ -357,6 +371,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         policy = self.install_policy()
         self.assertEqual((await self.public())["learning"]["active"], policy)
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15)))
+        publish_test_request(self.state)
         with patch.object(self.state["controller"], "decide", return_value=deepcopy(self.state["decision"])) as decide:
             row = await self.sample()
         self.assertEqual(decide.call_args.kwargs["power_thresholds"], {})
@@ -370,7 +385,27 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(learner.eligibility["reason"], "motor")
         self.assertTrue(all(bucket["n"] == 0 and bucket["seconds"] == 0 for bucket in learner.buckets.values()))
 
+    async def test_rules_monitor_publishes_atomic_jump_and_status_is_read_only(self):
+        self.assertTrue(self.state["controller"].rules_only)
+        for tick in range(0, 91, 3):
+            self.mono, self.wall = 100 + tick, 1000 + tick
+            self.state.update(fan=matched_fan(16, self.mono - .1, self.wall - .1), last_fan=self.mono)
+            row = await self.sample()
+        self.assertEqual(row["requested_level"], 13)
+        self.assertEqual(row["fan"]["level"], 16)
+        self.assertFalse(row["fan"]["confirmed"])
+        request = self.state["fan_request"]
+        self.assertEqual(request.release, service.ReleaseAuthority(16, 13, 3, 190, 250))
+        debt = deepcopy(vars(self.state["motor_schedule"]))
+        for _ in range(20):
+            status = await self.public()
+            self.assertEqual(status["fan"]["level"], 16)
+            self.assertFalse(status["decision"]["learning_eligible"])
+            self.assertIs(self.state["fan_request"], request)
+        self.assertEqual(vars(self.state["motor_schedule"]), debt)
+
     async def test_monitor_real_core_requests_preserve_episode_deadline_and_accept_only_new_readback(self):
+        self.state["controller"] = Controller(service.HOSTS)
         controller = self.state["controller"]
         for tick in range(-30, 31, 3):
             self.mono, self.wall = 100 + tick, 1000 + tick
