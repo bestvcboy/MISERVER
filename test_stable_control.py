@@ -178,6 +178,63 @@ class StableControlTests(unittest.TestCase):
 
 
 
+class HeadroomReleaseTests(unittest.TestCase):
+    def sample(self, controller, now, actual, cpu, board=50):
+        return controller.decide(fleet(now, cpu=cpu, gpu=44, board=board, power=60, load=5),
+            now, minimum_level=0, feedback=feedback(now, actual))
+
+    def test_tiny_drift_with_large_headroom_releases(self):
+        controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        actual = 10
+        edges = []
+        for now in range(0, 301, 3):
+            decision = self.sample(controller, now, actual, 45 + now * .001)
+            if decision['level'] < actual:
+                edges.append((now, actual, decision['level']))
+            actual = decision['level']
+        self.assertEqual(edges[:2], [(60, 10, 7), (123, 7, 4)])
+
+    def test_exact_eight_allows_drift_but_below_eight_vetoes(self):
+        for board, expected in ((57, [(60, 10, 8)]), (57.001, [])):
+            with self.subTest(board=board):
+                controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+                actual = 10
+                edges = []
+                for now in range(0, 91, 3):
+                    decision = self.sample(controller, now, actual, 45 + now * .001, board)
+                    if decision['level'] < actual:
+                        edges.append((now, actual, decision['level']))
+                    actual = decision['level']
+                self.assertEqual(edges, expected)
+
+    def test_pending_descent_keeps_mild_drift_but_revokes_near_target(self):
+        controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        for now in range(0, 61, 3):
+            decision = self.sample(controller, now, 10, 45)
+        self.assertEqual(decision['level'], 7)
+        deadline = decision['execution_trial']['original_deadline']
+        for now in (63, 66, 69):
+            decision = self.sample(controller, now, 10, 45 + (now - 60) * .001)
+            self.assertEqual(decision['level'], 7)
+            self.assertEqual(decision['execution_trial']['status'], 'pending')
+            self.assertEqual(decision['execution_trial']['original_deadline'], deadline)
+        decision = self.sample(controller, 72, 10, 58)
+        self.assertEqual(decision['trial']['outcome'], 'invalidated')
+        self.assertEqual(decision['level'], 10)
+
+    def test_warming_still_blocks_failed_floor_cool_requalification(self):
+        controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
+        actual = 10
+        for now in range(0, 691, 3):
+            cpu = 58 if now == 69 else 45 if now < 69 else 45 + (now - 69) * .001
+            decision = self.sample(controller, now, actual, cpu)
+            actual = decision['level']
+            if now >= 69:
+                self.assertTrue(decision['retry_blocked'])
+                self.assertGreater(actual, 7)
+        self.assertEqual(decision['operating']['failed_floor']['failed_at'], 69)
+
+
 class StableWorkerTests(unittest.TestCase):
     def test_ordinary_ascent_two_levels_ten_seconds(self):
         device = FakeFan(['on', 'favorite', 2, 900])

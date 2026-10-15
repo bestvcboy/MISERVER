@@ -1002,6 +1002,7 @@ class Controller:
         load = max((max(n.get("cpu_load") if n.get("cpu_load") is not None else 100, n.get("gpu_load") if n.get("gpu_load") is not None else 100) for n in frame["nodes"] if n.get("online")), default=100)
         power = max((n.get("power_w") or 0 for n in frame["nodes"] if n.get("online")), default=0)
         warming = any(s["rise"] > 0 or s["persistent_heat"] for s in evidence.values())
+        release_warming_veto = warming and frame["margin"] < 8
         qualified = (healthy and matched and context is not None and not identity_changed
             and not frame["telemetry_fault"] and not frame["wifi_gap"] and not frame["uncertain"]
             and bool(evidence) and all(s["covered"] for s in evidence.values()))
@@ -1101,7 +1102,7 @@ class Controller:
                 return result("recovery_released", "目的档位正转速已确认，开始热响应观察")
             else:
                 if not frame["thermal_risk"] and not emergency:
-                    if operation["destination"] < actual and (not qualified or warming or load >= 30 or power >= 80):
+                    if operation["destination"] < actual and (not qualified or release_warming_veto or load >= 30 or power >= 80):
                         transition("invalidated", "下降期间温度或负载资格改变")
                         operation.update(episode=None, status="invalidated", outcome="invalidated")
                         self.level = actual
@@ -1181,11 +1182,11 @@ class Controller:
                 return result("graded_pending", "当前需求分步上调，每次最多两档，确认后继续观察")
             self.level = actual
             return result("graded_hold", "上调间隔或匹配读回尚未满足")
-        eligible = qualified and not warming and not frame["power_warning"] and not frame["power_guard"]
+        eligible = qualified and not release_warming_veto and not frame["power_warning"] and not frame["power_guard"]
         eligible = eligible and frame["margin"] >= (5 if idle else 8) and not active_load and state.workload_epoch is None
         if eligible:
             state.observe_credit += credit
-        elif not qualified or warming or active_load:
+        elif not qualified or release_warming_veto or active_load:
             if advancing or not healthy:
                 state.observe_credit = 0
         required = max(state.settle_required, 30 if idle and frame["margin"] >= 8 else 180)

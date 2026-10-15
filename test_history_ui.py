@@ -52,7 +52,7 @@ class HistoryUITests(unittest.TestCase):
             self.assertNotIn(retired, html)
         for policy in ('普通上调每次最多两档', '同一可信传感器当前至少 70°C',
                        '75°C 硬线', '73°C 预缓冲', '≥10°C 观察 30 秒最多降 3 档',
-                       '8–10°C 最多降 2 档', '5–8°C 观察 180 秒最多降 1 档',
+                       '8–10°C 最多降 2 档', '5–8°C 无升温时观察 180 秒最多降 1 档',
                        '每次确认变化后至少观察 60 秒', '不计容量学习'):
             self.assertIn(policy, html)
 
