@@ -42,7 +42,7 @@
     "learning.py": "c211968cd0c6ce288382b331c40f219dffdb9119494d286dda7e9a94f421611b",
     "ops/README.md": "f5a67b0376f4634a2694a6615043a32678200153fe527e9d7c6daa813f411bdc",
     "ops/docker/Dockerfile": "4b345abae60b6e839ad767f4a0d4464e7f475c22d50c30c33fba4e64bc7ee430",
-    "ops/docker/Dockerfile.dockerignore": "dfa36e1c892cba1c0ed1d0cd4d58388e253d167a195e5c1b116e1f76bc1f64c5",
+    "ops/docker/Dockerfile.dockerignore": "15fee21271fbe141b6bc69506e39084d59aefb5886a517d3f344aa0dccfbc6e4",
     "ops/docker/compose.yaml": "2f7ccb90eca3c5ae7a9177a84ba03c998c0e0d91a3b8686c6b549722a17641be",
     "ops/docker/controller_supervisor.py": "7880a350d1ad67926df00b968226e4f11625828086a2148fe8955f21fcb6c590",
     "ops/docker/test_controller.py": "2746198c9773bbdaa51e6d739121bf07d44c403df9d1e54b61e36df5eb17a2ed",

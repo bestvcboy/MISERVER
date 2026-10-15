@@ -74,6 +74,7 @@
 !test_qr_ui.py
 !test_rebound_envelope.py
 !test_recovery_authority.py
+!test_rules_descent.py
 !test_rule_mode.py
 !test_scenarios.py
 !test_service.py
