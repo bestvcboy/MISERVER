@@ -97,8 +97,8 @@ const evaluate = code => vm.runInContext(code, context);
 assert.match(html, /value="168">最近 7 天/);
 assert.match(html, /id="retention"[^>]+value="7"/);
 assert.match(html, /id="capacity"[^>]+value="4096"/);
-assert.ok(html.includes('温度与故障保护始终生效。学习只发布有界功耗前馈阈值，先请求常规 10 档，不发布未经验证的低档策略。'));
-assert.ok(html.includes('功率前馈初值 80 W'));
+assert.ok(html.includes('当前暂停机器学习，已有学习参数不参与控制。按固定阈值、温度趋势与实际风力反馈自动控制。'));
+assert.ok(html.includes('固定功耗阈值为 80 W'));
 assert.ok(!html.includes('负载 30%'));
 const safetyText = '有效请求包含升温与故障保护。保存设置后仍须等待受限执行和设备读回。';
 context.status = {controller_age_seconds:0, server_time:102, updated_at:102,
@@ -201,6 +201,16 @@ assert.match(get('learning-schedule').textContent, /每 6 小时.*72 小时.*下
 context.learning.active = {};
 evaluate('renderLearning(learning)');
 assert.match(get('learning-published').textContent, /当前条件阻止激活/);
+context.learning.enabled = false;
+context.learning.active = {'192.168.3.180':{}};
+evaluate('renderLearning(learning)');
+assert.match(get('learning-state').textContent, /纯规则自动温控.*已暂停/);
+assert.match(get('learning-published').textContent, /学习阈值不参与控制/);
+assert.doesNotMatch(get('learning-published').textContent, /75 W|当前生效/);
+assert.doesNotMatch(get('learning-candidate').textContent, /50 W|训练/);
+assert.match(get('learning-schedule').textContent, /不训练、不评估、不发布/);
+assert.doesNotMatch(get('learning-schedule').textContent, /每 6 小时|下次/);
+assert.match(get('learning-storage').textContent, /原始温度、负载和风力历史继续记录/);
 assert.equal(evaluate("powerLabel({host:'192.168.3.183', power_source:'estimate:gpu'})"), '仅 GPU 估计，不是整机功耗；不用于学习发布');
 const sample = {ts:100, snapshot_at:102, control:{manual_level:null}, requested_level:0,
   fan:{configured:true, confirmed:true, level:0, rpm:800, power:'on', mode:'favorite', verified_at:101},

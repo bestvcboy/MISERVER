@@ -214,6 +214,14 @@ class ThermalNoiseTests(unittest.TestCase):
                 else:
                     nodes[0]['sensors'].append(dict(id='new', group='other', temp=40, calibrated=True))
                 decision = controller.decide(nodes, now, minimum_level=0, feedback=readback)
+                if event == 'power':
+                    self.assertEqual((decision['level'], decision['scenario']), (9, 'power_warning'))
+                    self.assertIsNone(controller._policy['rebound']['last'])
+                    for age in (3, 6):
+                        samples = fleet(now + age, cpu=57)
+                        samples[0]['power_w'] = 80
+                        decision = controller.decide(samples, now + age, minimum_level=0,
+                                                     feedback=feedback(now + age, 9))
                 self.assertGreaterEqual(decision['level'], 10)
                 self.assertFalse(decision['learning_eligible'])
                 self.assertEqual(decision['trial']['outcome'], 'failed' if event == 'throttle' else 'invalidated')

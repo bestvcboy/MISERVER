@@ -193,6 +193,13 @@ class ScenarioTests(unittest.TestCase):
                     actual = 8
                 decision = self.step(controller, requested + 6, actual=actual, nodes=nodes, **options)
                 self.assertFalse(decision['learning_eligible'])
+                if kind == 'power':
+                    self.assertEqual((decision['level'], decision['scenario'], decision['trial']['outcome']),
+                                     (9, 'power_warning', None))
+                    for age in (9, 12):
+                        nodes = fleet(requested + age)
+                        nodes[-1]['power_w'] = 80
+                        decision = self.step(controller, requested + age, actual=actual, nodes=nodes)
                 self.assertEqual(decision['trial']['outcome'], 'invalidated')
                 self.assertFalse(decision['retry_blocked'])
 
@@ -380,7 +387,10 @@ class ScenarioTests(unittest.TestCase):
                                 readback['fault'] = True
                             decision = self.step(controller, event_time, nodes=nodes, readback=readback, **options)
                             self.assertFalse(decision['learning_eligible'])
-                            if kind in ('power', 'learned', 'rapid'):
+                            if kind == 'power' and phase == 'observing' and manual is None:
+                                self.assertEqual((decision['level'], decision['scenario'], decision['trial']['outcome']),
+                                                 (9, 'power_warning', None))
+                            elif kind in ('power', 'learned', 'rapid'):
                                 self.assertGreaterEqual(decision['level'], 10)
                                 if kind == 'rapid' and 69.4 + 12 >= 75 or manual == 16:
                                     self.assertEqual(decision['level'], 16)

@@ -109,6 +109,14 @@ function powerLabel(node) {
 }
 
 function renderLearning(learning) {
+  if (learning.enabled === false) {
+    $('learning-state').textContent = '纯规则自动温控 · 机器学习已暂停';
+    $('learning-published').textContent = '已有学习阈值不参与控制，使用固定功耗、温度趋势和故障保护规则。';
+    $('learning-candidate').textContent = '逐级降档仍需稳定温度、有效采样和实际设备确认。';
+    $('learning-schedule').textContent = '不训练、不评估、不发布学习参数；旧学习记录保留。';
+    $('learning-storage').textContent = `保留学习文件 ${numeric((learning.preserved_bytes || 0) / 1048576, 2)} MiB；容量内预留 ${numeric((learning.reserved_bytes || 0) / 1048576, 2)} MiB。原始温度、负载和风力历史继续记录。`;
+    return;
+  }
   const labels = {health:'健康或设置条件未满足', gap:'采样或存储记录中断', source:'整机来源缺失或采集时间异常',
     identity:'节点或传感器身份变化', temperature:'温度不满足空闲基线条件', load:'负载未低于 10%',
     trend:'30 秒完整趋势未稳定', motor:'实际档位或近期读回未确认', stabilizing:'等待 120 秒稳定实际档位',

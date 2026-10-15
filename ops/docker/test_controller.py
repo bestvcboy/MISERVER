@@ -55,18 +55,23 @@ class NativeControllerTests(unittest.TestCase):
             for name, body in (('device-token', 'a'*32), ('tls.key', 'fake key'), ('tls.crt', 'fake certificate')):
                 path = state / name;path.write_text(body);path.chmod(0o600)
             (state/'logs').mkdir(mode=0o700)
+            learning = state/'learning';learning.mkdir(mode=0o700)
+            for name, body in (('checkpoint.json', b'paused invalid legacy content'), ('.pending-abcdefgh', b'preserved pending')):
+                path = learning/name;path.write_bytes(body);path.chmod(0o600)
             catalog = root / 'catalog.json';catalog.write_bytes(b'{}')
             record = dict(version=1,state='accepted',release=control.RELEASE,catalog_sha256=hashlib.sha256(b'{}').hexdigest(),
                           state_identity=[state.stat().st_dev,state.stat().st_ino],authorization='natural_load_continuous')
             admission = admit/'admission.json';admission.write_text(json.dumps(record));admission.chmod(0o600)
-            before = {p.name:p.read_bytes() for p in state.iterdir() if p.is_file()}
+            before = {p.relative_to(state).as_posix():p.read_bytes() for p in state.rglob('*') if p.is_file()}
             with patch.object(control.check,'CATALOG',catalog), patch.object(control.check,'validate_catalog'), patch.object(control.ssl.SSLContext,'load_cert_chain'):
                 result = control.preflight(state,admission)
                 self.assertEqual((result['motor_attempts'],result['motor_fault']), (2,True))
+                self.assertEqual((result['strategy_mode'], result['learning_enabled']), ('rules', False))
+                self.assertEqual(result['learning_preserved_bytes'], 46)
                 for changes in ({'state':'blocked'},{'catalog_sha256':'0'*64},{'authorization':'historical_trial'},{'state_identity':[0,0]}):
                     admission.write_text(json.dumps(dict(record,**changes)))
                     with self.assertRaises(ValueError): control.preflight(state,admission)
-            self.assertEqual({p.name:p.read_bytes() for p in state.iterdir() if p.is_file()},before)
+            self.assertEqual({p.relative_to(state).as_posix():p.read_bytes() for p in state.rglob('*') if p.is_file()},before)
 
     def test_actual_child_timeout_kills_reaps_and_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -72,8 +72,15 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.clock = patch("service.time", SimpleNamespace(
             monotonic=lambda: self.mono, time=lambda: self.wall))
         self.clock.start()
+        await self.open_app()
+
+    async def open_app(self, *, learning_enabled=False):
+        if hasattr(self, "state"):
+            await self.state["qr"].close()
+            self.state["disk"].shutdown(wait=True)
+            self.state["history_disk"].shutdown(wait=True)
         with patch("service.MotorSchedule.load", return_value=service.MotorSchedule()):
-            self.app = await service.create_app(self.root)
+            self.app = await service.create_app(self.root, learning_enabled=learning_enabled)
         self.state = self.app[service.STATE]
         self.state["settings"]["manual_level"] = None
         self.state["fan"] = matched_fan()
@@ -206,7 +213,9 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(result["fan"], self.state["fan"])
 
     async def test_status_authoritative_physical_health_faults_block_policy_without_rewriting_evidence(self):
-        self.install_policy()
+        await self.open_app(learning_enabled=True)
+        policy = self.install_policy()
+        self.assertEqual((await self.public())["learning"]["active"], policy)
         for changes in (dict(fault=True), dict(fault=None), dict(fault="unknown"),
                         dict(rpm=0), dict(power="off"), dict(mode="auto"),
                         dict(verified_at=990), dict(verified_at=1001)):
@@ -241,6 +250,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(decide.call_args.kwargs["feedback"]["fault"], fault)
 
     async def test_monitor_new_intent_blocks_row_policy_and_learner_but_keeps_valid_decision_input(self):
+        await self.open_app(learning_enabled=True)
         policy = self.install_policy()
         self.state["decision"] = dict(level=16, execution_trial=None)
         physical = deepcopy(self.state["fan"])
@@ -269,7 +279,9 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.public())["learning"]["active"], policy)
 
     async def test_monitor_current_pending_policy_is_blocked_before_decide(self):
-        self.install_policy()
+        await self.open_app(learning_enabled=True)
+        policy = self.install_policy()
+        self.assertEqual((await self.public())["learning"]["active"], policy)
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15)))
         with patch.object(self.state["controller"], "decide", return_value=deepcopy(self.state["decision"])) as decide:
             row = await self.sample()

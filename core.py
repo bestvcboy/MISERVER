@@ -153,6 +153,7 @@ class Controller:
         self.load_history = {}
         self.workload_history = {}
         self.workload_context = None
+        self.power_exposure = {}
 
     @property
     def upward(self):
@@ -292,6 +293,7 @@ class Controller:
         self.history.clear()
         self.positive_since.clear()
         self.load_history.clear()
+        self.power_exposure.clear()
         self.workload_history.clear()
         self.workload_context = None
         self._policy["learning_window"].clear()
@@ -474,7 +476,7 @@ class Controller:
         persistent_heat = False
         deficits = set()
         evidence = {}
-        power_guard = False
+        power_guard, power_warning = False, False
         load_event, low_load = None, True
         evaluation_elapsed = 0 if self.last_evaluation is None else max(0, now - self.last_evaluation)
         if self.last_evaluation is not None and (now <= self.last_evaluation or now - self.last_evaluation > 6):
@@ -559,14 +561,30 @@ class Controller:
                        and isinstance(learned, dict) and learned.get("source") == POWER_SOURCE
                        and type(threshold) in (int, float) and math.isfinite(threshold)
                        and 40 <= threshold <= 80 and power is not None and power >= threshold)
-            if power is not None and power >= 80:
-                reasons.append(f"[power] {host} power={power:g}W >=80W，常规需求至少 10 档")
-                demand = max(demand, MIN_LEVEL)
-                power_guard = True
-            elif earlier:
+            if earlier:
                 reasons.append(f"[power] {host} power={power:g}W source={node.get('power_source')} 已发布整机功耗阈值 {threshold:g} W，常规需求至少 10 档")
                 demand = max(demand, MIN_LEVEL)
                 power_guard = True
+                self.power_exposure.pop(host, None)
+            elif type(power) in (int, float) and math.isfinite(power) and power >= 80:
+                key = (node.get("hostname"), node.get("power_source"), frozenset(ids))
+                exposure = self.power_exposure.get(host)
+                if (exposure is None or exposure["key"] != key
+                        or not 0 < now - exposure["last"] <= 6
+                        or source_ts <= exposure["source_ts"]):
+                    exposure = dict(key=key, start=now, last=now, source_ts=source_ts, count=0)
+                    self.power_exposure[host] = exposure
+                exposure.update(last=now, source_ts=source_ts, count=min(3, exposure["count"] + 1))
+                sustained = exposure["count"] >= 3 and now - exposure["start"] >= 6
+                if sustained:
+                    reasons.append(f"[power] {host} power={power:g}W >=80W，连续至少3样本跨度={now - exposure['start']:g}/6s，常规需求至少10档")
+                    demand = max(demand, MIN_LEVEL)
+                    power_guard = True
+                else:
+                    power_warning = True
+                    reasons.append(f"[power-warning] {host} power={power:g}W >=80W，连续样本={exposure['count']}/3 跨度={now - exposure['start']:g}/6s，暂停下降和学习")
+            else:
+                self.power_exposure.pop(host, None)
             if load >= 10:
                 low_load = False
             if load >= 30:
@@ -729,17 +747,24 @@ class Controller:
                      load_event=load_event, reasons=reasons, slopes=slopes, complete=complete,
                      thermal_risk=thermal_risk, telemetry_fault=telemetry_fault,
                      margin=soft_margin, uncertain=thermal_uncertain, persistent_heat=persistent_heat,
-                     cold=cold, power_guard=power_guard, evidence=evidence, deficits=deficits)
+                     cold=cold, power_guard=power_guard, power_warning=power_warning,
+                     evidence=evidence, deficits=deficits)
+        if telemetry_fault or thermal_risk or wifi_gap:
+            self.power_exposure.clear()
         return self._advance(frame)
 
     def _advance(self, frame):
         now, nodes = frame["now"], frame["nodes"]
         policy, reasons = self._policy, frame["reasons"]
         context = self._context(nodes) if not frame["telemetry_fault"] else None
+        if context is None:
+            self.power_exposure.clear()
         caller = (frame["minimum"], frame["manual"])
         changed = self.mode is not None and self.mode != caller
         self.mode = caller
         healthy = self._feedback_valid(frame["feedback"], now)
+        if not healthy:
+            self.power_exposure.clear()
         actual = frame["feedback"]["level"] if healthy else self.level
         stamp = frame["feedback"]["observed_mono"] if healthy else -math.inf
         advancing = healthy and stamp > self.last_feedback
@@ -793,10 +818,11 @@ class Controller:
                       or frame["load_event"] == "unverified_load"
                       or trial is not None and trial["confirmed_at"] is not None
                       and (actual != trial["to"] or not matched))
-        attributable = retained and trial["confirmed_at"] is not None and not confounded
+        attributable = (retained and trial["confirmed_at"] is not None and not confounded
+                        and not frame["power_warning"])
         if retained and confounded:
             self._finish_trial("invalidated")
-        if (changed or continuity_lost or workload_change or frame["power_guard"] or context is None
+        if (changed or continuity_lost or workload_change or frame["power_guard"] or frame["power_warning"] or context is None
                 or frame["load_event"] == "unverified_load"):
             self._retire_guards()
         if changed:
@@ -809,7 +835,7 @@ class Controller:
             window = policy["learning_window"]
             key = (actual, identity, caller)
             strict = (eligible and valid and frame["low_load"] and frame["manual"] is None
-                      and not changed and not frame["power_guard"] and not frame["load_event"]
+                      and not changed and not frame["power_guard"] and not frame["power_warning"] and not frame["load_event"]
                       and not frame["warming"] and not frame["persistent_heat"]
                       and actual == self.level and not self._pending() and not policy["cold_band"])
             if not strict or policy["learning_key"] != key:
@@ -830,7 +856,7 @@ class Controller:
                 learning = stable is not None and now - window[0][0] >= 120
             owner = {"graded_hold": "graded", "trial_observe": "probe_observe", "steady_low": "ordinary_search",
                      "trial_pending": "pending", "graded_pending": "pending"}.get(tag, tag)
-            if tag not in ("recovery_released", "recovery", "protect", "manual", "thermal_uncertain", "warming_hold"):
+            if tag not in ("recovery_released", "recovery", "protect", "manual", "thermal_uncertain", "warming_hold", "power_warning"):
                 if policy["state"]["tag"] != owner:
                     policy["state"] = dict(tag=owner)
             prefix = "[cold-release] " if (tag == "cold_release" or
@@ -842,6 +868,7 @@ class Controller:
         operation = policy["operation"]
         expired = pending and now >= operation["episode"].original_deadline
         if expired:
+            self.power_exposure.clear()
             episode = operation["episode"]
             operation.update(episode=None, outcome="execution_timeout", status="execution_timeout",
                          elapsed=max(0, now - episode.original_requested_at))
@@ -904,6 +931,11 @@ class Controller:
                 self._request(max(MIN_LEVEL, actual, trial["from"], reserve), actual, now, context,
                               purpose="rollback", profile="ordinary")
                 self._retire_search()
+            elif frame["power_warning"] and destination < episode.original_from:
+                self._finish_trial("invalidated")
+                self._request(max(actual, episode.original_from, reserve), actual, now, context,
+                              purpose="rollback", profile="ordinary")
+                self._retire_search()
             trial = policy["operation"]
             confirmation = (advancing and matched and actual == trial["destination"]
                             and stamp > trial["destination_requested_at"] and not frame["wifi_gap"])
@@ -957,7 +989,8 @@ class Controller:
                 if operation is None or operation["outcome"] != "execution_timeout":
                     self._request(MAX_LEVEL, actual, now, context, purpose="protect", profile="protect")
                 return result("protect", "启动或故障恢复，等待实际16档确认")
-            startup_ok = valid and frame["quiet"] and not changed and frame["load_event"] != "load_spike"
+            startup_ok = (valid and frame["quiet"] and not changed and not frame["power_warning"]
+                          and frame["load_event"] != "load_spike")
             state = self._credit("startup", frame, startup_ok)
             self.recovery_since = state["since"] if state["last"] is not None else None
             if not startup_ok or state["earned"] < 30:
@@ -992,6 +1025,13 @@ class Controller:
                           purpose="rollback", profile="ordinary")
             self.phase = "rollback"
             return result("rollback", "目标温度风险，回退先前确认档位；仅确认且可归因的试验记为热失败")
+        if reserve > actual:
+            self._finish_trial("invalidated")
+            self._retire_search()
+            policy["cold_band"] = False
+            self._request(reserve, actual, now, context, purpose="reserve",
+                          profile="manual" if floor > actual else "ordinary")
+            return result("graded_pending", f"常规需求/60C准备 requested={reserve} actual={actual} deadline={now + 60:g}")
         if active_probe:
             qualification = self._qualification(now, frame["manual"], frame["cold"], frame["margin"])
             trial["elapsed"] = max(0, now - trial["confirmed_at"])
@@ -1008,6 +1048,11 @@ class Controller:
                 self.phase = "rollback"
                 reasons.append(f"[trial] cause={cause}")
                 return result("rollback", "probe inconclusive_timeout，300s绝对观察截止，回退并重建当前证据")
+            if frame["power_warning"] and reserve <= actual:
+                policy["state"]["last"] = None
+                if policy["rebound"] is not None:
+                    policy["rebound"]["last"] = None
+                return result("power_warning", "短时功耗升高，保留已确认观察及绝对截止，暂停下降和学习")
             observation = advancing and matched and context is not None and not frame["wifi_gap"]
             state = self._credit("probe_observe", frame, observation)
             eligible = valid and frame["quiet"] and not frame["persistent_heat"] and not frame["load_event"]
@@ -1030,13 +1075,6 @@ class Controller:
                           f"probe confirmed={trial['elapsed']:g}/120s earned={state['earned']:g} "
                           f"cold=False margin={frame['margin']:.3f}/3C deadline={trial['deadline']:g}; {qualification['detail']}")
 
-        if reserve > actual:
-            self._finish_trial("invalidated")
-            self._retire_search()
-            policy["cold_band"] = False
-            self._request(reserve, actual, now, context, purpose="reserve",
-                          profile="manual" if floor > actual else "ordinary")
-            return result("graded_pending", f"常规需求/60C准备 requested={reserve} actual={actual} deadline={now + 60:g}")
         edge = policy["last_downward"]
         if actual != self.level or actual < MIN_LEVEL and edge is not None and actual != edge["edge"][1]:
             if actual < MIN_LEVEL and edge is not None and actual != edge["edge"][1]:
@@ -1050,6 +1088,12 @@ class Controller:
             policy["state"] = dict(tag="hold")
             return result("hold", "执行待匹配，冻结证据")
 
+        if frame["power_warning"] and not frame["deficits"]:
+            policy["state"]["last"] = None
+            if policy["rebound"] is not None:
+                policy["rebound"]["last"] = None
+            return result("power_warning", "短时功耗升高，保持已确认档位，暂停下降、准入及学习")
+
         hot_witnesses = policy["thermal_witnesses"]
         hot_fall = (bool(hot_witnesses) and all(key in frame["evidence"] and frame["evidence"][key]["fall"]
                     for key in hot_witnesses)
@@ -1057,7 +1101,7 @@ class Controller:
                     and all(s["temp"] < s["hard"] - 2 and
                             (s["group"] != "board" or s["temp"] <= s["target"] - 2)
                             for s in frame["evidence"].values()))
-        if hot_fall and valid and actual > max(MIN_LEVEL, reserve):
+        if hot_fall and valid and not frame["power_warning"] and actual > max(MIN_LEVEL, reserve):
             state = self._credit("high_recovery", frame, True)
             if state["earned"] >= 30 and now - self.last_drop >= 30:
                 self._request(actual - 1, actual, now, context, purpose="release", profile="recovery")

@@ -356,10 +356,42 @@ def notify(message):
         pass
 
 
-async def create_app(root, origins=None):
+def learning_archive_usage(root):
+    directory = Path(root) / "learning"
+    try:
+        before = directory.lstat()
+    except FileNotFoundError:
+        return dict(checkpoint_bytes=0, preserved_bytes=0, reserved_bytes=0)
+    if (not stat.S_ISDIR(before.st_mode)
+            or os.name == "posix" and before.st_uid != os.getuid()):
+        raise ValueError("learning archive directory")
+    checkpoint_bytes, preserved_bytes = 0, 0
+    for count, path in enumerate(directory.iterdir(), 1):
+        if count > 128:
+            raise ValueError("learning archive count")
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or os.name == "posix" and info.st_uid != os.getuid()):
+            raise ValueError("learning archive file ownership")
+        if path.name != "checkpoint.json" and not re.fullmatch(r"\.pending-[a-z0-9_]{8}", path.name):
+            raise ValueError("learning archive file name")
+        if info.st_size > 4 * 1024**2:
+            raise ValueError("learning archive file size")
+        preserved_bytes += info.st_size
+        if path.name == "checkpoint.json":
+            checkpoint_bytes = info.st_size
+    after = directory.lstat()
+    if (before.st_dev, before.st_ino, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_mtime_ns):
+        raise ValueError("learning archive changed")
+    return dict(checkpoint_bytes=checkpoint_bytes, preserved_bytes=preserved_bytes,
+                reserved_bytes=preserved_bytes)
+
+
+async def create_app(root, origins=None, *, learning_enabled=False):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
+    archive_usage = learning_archive_usage(root) if not learning_enabled else None
     defaults = {"retention_days": 7, "max_log_mb": 4096, "manual_level": MAX_LEVEL}
     settings_path = root / "settings.json"
     settings = settings_from_disk(json.loads(settings_path.read_text()) if settings_path.exists() else defaults)
@@ -383,13 +415,19 @@ async def create_app(root, origins=None):
              "learning": {}, "learning_wall": None, "learning_mono": None,
              "history_recording": {"source": "control", "state": "starting", "writes": 0,
                  "failed_writes": 0, "last_timestamp": None, "error": None}}
-    learning = Learning(HOSTS)
+    learning = Learning(HOSTS) if learning_enabled else None
     learning_root = root / "learning"
     learning_path = learning_root / "checkpoint.json"
     learning_loaded = False
     learning_checkpoint_bucket = None
     durable_published = {}
-    state["learning"] = learning.status(settings)
+    def disabled_learning(usage):
+        return dict(enabled=False, reason="disabled", published={}, active={}, candidate={},
+                    eligibility=dict(phase="disabled", reason="disabled", since=None, context=None, gear=None),
+                    next_at=None, bucket_count=0, fixed_power_w=80, error="",
+                    **{key: usage.get(key, 0) for key in ("checkpoint_bytes", "preserved_bytes", "reserved_bytes")})
+
+    state["learning"] = learning.status(settings) if learning_enabled else disabled_learning(archive_usage)
 
     @web.middleware
     async def protection(request, handler):
@@ -473,11 +511,13 @@ async def create_app(root, origins=None):
         return await drain_owned(asyncio.get_running_loop().run_in_executor(state["disk"], function, *args))
 
     def learning_healthy():
-        return (not state["stop"] and not state["force_max"] and not state["pairing"]
+        return (learning_enabled and not state["stop"] and not state["force_max"] and not state["pairing"]
                 and state["settings_task"] is None and not state["settings_error"]
                 and not state["storage_error"] and fan_healthy())
 
     def active_power(nodes, now, wall, advancing=False):
+        if not learning_enabled:
+            return {}
         cached = state["learning"]
         observed = current_fan(wanted())
         if (not learning_healthy() or cached.get("error")
@@ -558,6 +598,8 @@ async def create_app(root, origins=None):
         return recovered
 
     def learning_reserve(config):
+        if not learning_enabled:
+            return learning_archive_usage(root)["reserved_bytes"]
         limit = checkpoint_limit(config)
         return limit + max(limit, learning_path.stat().st_size if learning_path.exists() else 0)
 
@@ -573,10 +615,12 @@ async def create_app(root, origins=None):
             "storage_error", "settings_error", "dropped_records", "log_bytes", "updated_at")} | {
                 "requested_level": requested_level, "settings_pending": state["settings_task"] is not None,
                 "read_only": False, "control_mode": "auto" if state["settings"]["manual_level"] is None else "manual",
+                "strategy_mode": "learning" if learning_enabled else "rules",
                 "control_active": not state["stop"] and state["updated_at"] is not None and time.monotonic() - state["last_poll"] < 8,
                 "history_recording": dict(state["history_recording"]),
                 "fan": current_fan(requested_level),
-                "learning": dict(state["learning"], active=active_power(state["nodes"], time.monotonic(), time.time())),
+                "learning": (dict(state["learning"], enabled=True, active=active_power(state["nodes"], time.monotonic(), time.time()))
+                             if learning_enabled else disabled_learning(state["learning"])),
                 "server_time": time.time(), "period_seconds": 3,
                 "controller_age_seconds": round(time.monotonic() - state["last_poll"], 2)})
 
@@ -619,15 +663,20 @@ async def create_app(root, origins=None):
                             actual = None
                         return actual, "设置保存结果未可靠确认，保持全风；请刷新状态后重新保存", "", None, None
                     try:
-                        load_learning(state["settings"])
+                        if learning_enabled:
+                            load_learning(state["settings"])
                         state["journal"].prune(time.time(), proposed["retention_days"],
                                                proposed["max_log_mb"] * 1024**2 - Journal.SEGMENT_BYTES
                                                - learning_reserve(proposed))
-                        cached = learning_checkpoint(proposed, time.time())
-                        return proposed, "", "", state["journal"].size() + learning.bytes, cached
+                        cached = (learning_checkpoint(proposed, time.time()) if learning_enabled
+                                  else disabled_learning(learning_archive_usage(root)))
+                        return proposed, "", "", state["journal"].size() + (
+                            learning.bytes if learning_enabled else cached["preserved_bytes"]), cached
                     except Exception:
-                        learning.fail()
-                        return proposed, "", "设置已保存，但历史或学习状态维护失败，可能已部分清理；检查磁盘后重试", None, learning.status(proposed)
+                        if learning_enabled:
+                            learning.fail()
+                        return proposed, "", "设置已保存，但历史或学习状态维护失败，可能已部分清理；检查磁盘后重试", None, (
+                            learning.status(proposed) if learning_enabled else disabled_learning(state["learning"]))
                 actual, error, maintenance_error, size, cached = await disk_call(save)
                 if actual is not None:
                     state["settings"] = actual
@@ -731,7 +780,7 @@ async def create_app(root, origins=None):
                 nodes = await asyncio.gather(*(poll(session, host, wall) for host in HOSTS))
                 now = time.monotonic()
                 minimum = state["settings"]["manual_level"]
-                power_thresholds = active_power(nodes, now, wall, advancing=True)
+                power_thresholds = active_power(nodes, now, wall, advancing=True) if learning_enabled else {}
                 feedback = current_fan(wanted())
                 if state["motor_schedule"].fault:
                     feedback["fault"] = True
@@ -739,18 +788,20 @@ async def create_app(root, origins=None):
                                                        power_thresholds=power_thresholds,
                                                        feedback=feedback,
                                                        manual_level=minimum)
+                if not learning_enabled:
+                    decision["learning_eligible"] = False
                 if (state["storage_error"] or state["settings_error"] or not fan_healthy()
                         or state["pairing"] or state["settings_task"] is not None):
                     decision.update(protect())
                 state.update(nodes=nodes, decision=decision, last_poll=now, updated_at=wall)
                 requested_level = wanted()
-                row_power_thresholds = active_power(nodes, now, wall)
+                row_power_thresholds = active_power(nodes, now, wall) if learning_enabled else {}
                 row = {"ts": wall, "snapshot_at": time.time(), "nodes": nodes,
                        "control": {"manual_level": minimum}, "decision": deepcopy(decision),
                        "fan": current_fan(requested_level), "requested_level": requested_level,
                        "active_power_policy": {host: {key: policy[key] for key in
                            ("version", "threshold_w", "source", "generated_at")} for host, policy in row_power_thresholds.items()},
-                       "learning": {"healthy": learning_healthy(), "mono": now,
+                       "learning": {"enabled": learning_enabled, "healthy": learning_healthy(), "mono": now,
                                     "revision": state["settings_revision"],
                                     "dropped_records": state["dropped_records"],
                                     "elapsed": now - state["learning_mono"] if state["learning_mono"] is not None else 0}}
@@ -768,7 +819,8 @@ async def create_app(root, origins=None):
 
     async def storage():
         def write(row, config):
-            load_learning(config)
+            if learning_enabled:
+                load_learning(config)
             budget = config["max_log_mb"] * 1024**2
             encoded = len(json.dumps(row, ensure_ascii=False).encode()) + 1
             if encoded > 65536:
@@ -780,11 +832,15 @@ async def create_app(root, origins=None):
                 state["history_recording"].update(state="recording",
                     writes=state["history_recording"]["writes"] + 1, last_timestamp=row["ts"], error=None)
             except Exception:
-                learning.loss["raw_append"] += 1
-                learning.eligibility.update(phase="blocked", reason="gap", since=None)
-                for bucket in learning.buckets.values():
-                    bucket["last"] = None
+                if learning_enabled:
+                    learning.loss["raw_append"] += 1
+                    learning.eligibility.update(phase="blocked", reason="gap", since=None)
+                    for bucket in learning.buckets.values():
+                        bucket["last"] = None
                 raise
+            if not learning_enabled:
+                usage = learning_archive_usage(root)
+                return state["journal"].size() + usage["preserved_bytes"], disabled_learning(usage)
             try:
                 raw_since = state["journal"].retained_since
                 learning.trim(time.time(), config, raw_since if raw_since is not None else time.time())
@@ -813,7 +869,9 @@ async def create_app(root, origins=None):
                 size, cached = await disk_call(write, row, config)
                 state["log_bytes"] = size
                 state["storage_error"] = ""
-                if (revision == state["settings_revision"] and row.get("learning", {}).get("revision") == revision
+                if not learning_enabled:
+                    state["learning"] = cached
+                elif (revision == state["settings_revision"] and row.get("learning", {}).get("revision") == revision
                         and row.get("ts") == state["updated_at"] and learning_healthy()
                         and context_of(state["nodes"]) == cached["eligibility"].get("context")):
                     state["learning"] = dict(cached, settings_revision=revision)
@@ -899,10 +957,11 @@ async def create_app(root, origins=None):
                     await asyncio.wait_for(apply_fan(state["device"]), timeout=10)
         except Exception:
             pass
-        try:
-            state["learning"] = await disk_call(learning_checkpoint, dict(state["settings"]), time.time())
-        except Exception:
-            state["learning"] = dict(state["learning"], error="学习检查点保存失败，固定保护继续生效")
+        if learning_enabled:
+            try:
+                state["learning"] = await disk_call(learning_checkpoint, dict(state["settings"]), time.time())
+            except Exception:
+                state["learning"] = dict(state["learning"], error="学习检查点保存失败，固定保护继续生效")
         state["disk"].shutdown(wait=False, cancel_futures=True)
         state["history_disk"].shutdown(wait=False, cancel_futures=True)
 

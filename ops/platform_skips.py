@@ -1,6 +1,7 @@
 POSIX_SKIPS = {'test_startup_evidence.EvidenceTests.test_unsupported_windows_private_creation_is_explicit_refusal'}
 
 WINDOWS_SKIPS = {
+    'test_rule_mode.LearningArchiveTests.test_archive_rejects_symlinks_and_wrong_owner',
     'test_controller.NativeControllerTests.test_preflight_preserves_faulted_budget_and_refuses_wrong_admission',
     'test_controller.NativeControllerTests.test_actual_child_timeout_kills_reaps_and_preserves_evidence',
     'test_controller.NativeControllerTests.test_child_ready_without_heartbeat_expires_and_ignored_term_is_killed',

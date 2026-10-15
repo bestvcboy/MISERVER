@@ -18,10 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import check
 from core import Journal
-from learning import Learning, checkpoint_limit
-from service import HOSTS, MotorSchedule, settings_from_disk
+from service import MotorSchedule, learning_archive_usage, settings_from_disk
 
-RELEASE = 'docker-auto-20261015'
+RELEASE = 'docker-rules-power-warning-20261015'
 STATE = Path('/home/bestvcboy/dgx-thermal/state')
 ADMISSION = Path('/home/bestvcboy/dgx-thermal-control-admission/admission.json')
 EVIDENCE = Path('/home/bestvcboy/dgx-thermal-control-evidence')
@@ -85,15 +84,14 @@ def preflight(state=STATE, admission=ADMISSION):
     regular(state / 'tls.crt', 65536)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(state / 'tls.crt', state / 'tls.key')
-    checkpoint = state / 'learning/checkpoint.json'
-    if checkpoint.exists() or checkpoint.is_symlink():
-        Learning(HOSTS).restore(regular(checkpoint, checkpoint_limit(settings), True).decode('utf8'), time.time(), settings)
+    learning_usage = learning_archive_usage(state)
     index = Journal.index_ready(state / 'logs')
     if os.statvfs(state).f_bavail * os.statvfs(state).f_frsize < 128 * 1024 * 1024:
         raise ValueError('Insufficient free storage')
     return dict(release=RELEASE, catalog_sha256=expected['catalog_sha256'],
                 state_identity=expected['state_identity'], index=index, motor_fault=budget.fault,
-                motor_attempts=budget.attempts, settings=settings)
+                motor_attempts=budget.attempts, settings=settings, strategy_mode='rules',
+                learning_enabled=False, learning_preserved_bytes=learning_usage['preserved_bytes'])
 
 
 @dataclass

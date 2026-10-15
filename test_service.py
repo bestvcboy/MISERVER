@@ -1101,6 +1101,14 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         from core import normalize
         from learning import Learning, context_of
 
+        self.app[STATE]['device'] = None
+        await self.client.close()
+        self.app = await create_app(self.root, {self.origin}, learning_enabled=True)
+        self.startup = self.app.on_startup[-1]
+        self.app.on_startup.clear()
+        self.client = TestClient(TestServer(self.app))
+        await self.client.start_server()
+
         rows = json.loads(Path(__file__).with_name(
             "test_fan_snapshot_transitions.json").read_text(encoding="utf-8"))["changes_and_final_rows"]
         state = self.app[STATE]
@@ -1305,7 +1313,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
                 with self.assertRaises(asyncio.CancelledError):
                     await first
-        self.assertEqual(order, ["commit", "sync", "prune", "learning_commit", "learning_sync"])
+        self.assertEqual(order, ["commit", "sync", "prune"])
         self.assertIsNone(state["settings_task"])
         self.assertEqual(state["settings"], proposed)
         self.assertEqual(state["controller"].level, 16)

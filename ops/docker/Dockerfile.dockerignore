@@ -68,11 +68,13 @@
 !test_lower_airflow.py
 !test_matrix_timelines.py
 !test_mode_matrix.py
+!test_power_warning.py
 !test_predictive_guard.py
 !test_qr_connector.py
 !test_qr_ui.py
 !test_rebound_envelope.py
 !test_recovery_authority.py
+!test_rule_mode.py
 !test_scenarios.py
 !test_service.py
 !test_settled_step.py

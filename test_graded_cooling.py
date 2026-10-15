@@ -35,6 +35,10 @@ class GradedCoolingTests(unittest.TestCase):
         controller, now = test_equilibrium.EquilibriumTests().reach(9, cpu=42.8)
         decision = controller.decide(fleet(now + 3, cpu=43, power=104), now + 3,
                                      minimum_level=0, feedback=feedback(now + 3, 9))
+        self.assertEqual((decision['level'], decision['scenario']), (9, 'power_warning'))
+        for age in (6, 9):
+            decision = controller.decide(fleet(now + age, cpu=43, power=104), now + age,
+                                         minimum_level=0, feedback=feedback(now + age, 9))
         self.assertEqual(decision['level'], 10)
         self.assertFalse(decision['learning_eligible'])
 

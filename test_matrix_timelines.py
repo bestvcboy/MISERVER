@@ -148,7 +148,10 @@ class MatrixTimelineTests(unittest.TestCase):
         completed = controller.trial
         self.assertEqual((completed['from'], completed['to'], completed['outcome']),
                          (5, 4, 'recovery_released'))
-        requested = start + 3
+        for age in (3, 6):
+            warning = self.step(controller, start + age, 4, cpu=42, power=80)
+            self.assertEqual((warning['level'], warning['scenario']), (4, 'power_warning'))
+        requested = start + 9
         decision = self.step(controller, requested, 4, cpu=42, power=80)
         trial = decision['execution_trial']
         self.assertEqual(decision['level'], 10)
@@ -415,7 +418,9 @@ class MatrixTimelineTests(unittest.TestCase):
 
     def test_terminal_execution_evidence_survives_new_faults_until_startup_qualifies(self):
         controller, start = self.reach(4, cpu=42)
-        requested, deadline = start + 3, start + 63
+        for age in (3, 6):
+            self.step(controller, start + age, 4, cpu=42, power=80)
+        requested, deadline = start + 9, start + 69
         for now in range(requested, deadline + 1, 3):
             decision = self.step(controller, now, 4, cpu=42, power=80)
         for now in range(deadline + 3, deadline + 34, 3):
