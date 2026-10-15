@@ -9,6 +9,7 @@ import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from core import Journal
@@ -76,14 +77,14 @@ class LearningStorageTests(unittest.IsolatedAsyncioTestCase):
     async def commit(self, stamp, gear=0, power=35, load=0, learning_eligible=True):
         self.now = stamp
         row = frame(stamp, gear=gear, power=power)
-        row["fan"].update(observed_mono=time.monotonic(), execution="matched", fault=False)
+        row["fan"].update(observed_mono=self.service.time.monotonic(), execution="matched", fault=False)
         row["decision"].update(scenario="steady", learning_eligible=learning_eligible)
         row["learning"]["revision"] = self.state["settings_revision"]
         row["learning"]["elapsed"] = stamp - self.learner.last_ts if self.learner.last_ts is not None else 3
         for node in row["nodes"]:
             node["cpu_load"] = load
         self.state.update(nodes=row["nodes"], updated_at=stamp, fan=row["fan"], last_poll=stamp,
-                          last_fan=time.monotonic(), learning_wall=stamp,
+                          last_fan=self.service.time.monotonic(), learning_wall=stamp,
                           decision=dict(row["decision"], level=gear, execution_trial=None))
         publish_test_request(self.state)
         self.state["queue"].put_nowait(row)
@@ -91,6 +92,10 @@ class LearningStorageTests(unittest.IsolatedAsyncioTestCase):
         return row
 
     async def test_durable_restart_policy_triggers_reserve_ten_and_survives_load_gear_pending(self):
+        clock = patch.object(self.service, "time", SimpleNamespace(
+            time=lambda: self.now, monotonic=lambda: self.now))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.assertEqual(json.loads((self.root / 'learning' / 'checkpoint.json').read_text(encoding='utf-8'))['controller'], 14)
         row = await self.commit(self.now)
         policy = deepcopy(self.state["learning"]["published"])
@@ -114,6 +119,16 @@ class LearningStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已发布整机功耗", " ".join(decision["reasons"]))
         row = await self.commit(self.now + 3, gear=16, power=76, load=40)
         self.assertEqual(self.state["learning"]["published"], policy)
+        self.assertIsNotNone(self.state["controller"]._policy["operation"]["episode"])
+        self.assertEqual(self.active_power(row["nodes"], self.now, self.now), {})
+        self.now += 3
+        confirmed = frame(self.now, gear=10, power=76)
+        decision = self.state["controller"].decide(confirmed["nodes"], self.now, minimum_level=0,
+            power_thresholds=policy, feedback=confirmed["fan"] | {
+                "execution": "matched", "fault": False, "observed_mono": self.now})
+        self.assertEqual((decision["level"], decision["execution_trial"]["status"]), (10, "confirmed"))
+        self.assertIsNone(self.state["controller"]._policy["operation"]["episode"])
+        row = await self.commit(self.now, gear=10, power=76, load=40)
         self.assertEqual(self.active_power(row["nodes"], self.now, self.now), policy)
         self.state["fan"].update(confirmed=False, execution="pending")
         self.assertEqual(self.active_power(row["nodes"], self.now, self.now), {})

@@ -20,7 +20,7 @@ import check
 from core import Journal
 from service import MotorSchedule, learning_archive_usage, settings_from_disk
 
-RELEASE = 'docker-stable-control-r4-20261015'
+RELEASE = 'docker-completed-execution-r1-20261015'
 STATE = Path('/home/bestvcboy/dgx-thermal/state')
 ADMISSION = Path('/home/bestvcboy/dgx-thermal-control-admission/admission.json')
 EVIDENCE = Path('/home/bestvcboy/dgx-thermal-control-evidence')

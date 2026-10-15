@@ -28,6 +28,16 @@ def execution(level, stamp=100):
                 original_deadline=150, deadline=150, status="pending")
 
 
+def operation(level, stamp=100, *, requested_at=90, status="pending", outcome=None):
+    controller = Controller(service.HOSTS)
+    controller._request(15, 16, requested_at, None, purpose="release", profile="ordinary")
+    value = controller._policy["operation"]
+    value.update(destination=level, destination_requested_at=stamp, status=status, outcome=outcome)
+    if status != "pending":
+        value.update(episode=None, confirmed_at=stamp + .1 if status in ("confirmed", "observing") else None)
+    return value
+
+
 def telemetry(wall):
     return dict(timestamp=wall, cpu_percent=0, gpu_percent=0, system_power_w=35,
                 system_power_source="spbm", temperatures=dict(gpu=40,
@@ -194,13 +204,13 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.clock.start()
         await self.open_app()
 
-    async def open_app(self, *, learning_enabled=False):
+    async def open_app(self, *, learning_enabled=False, high_wind_gate=False):
         if hasattr(self, "state"):
             await self.state["qr"].close()
             self.state["disk"].shutdown(wait=True)
             self.state["history_disk"].shutdown(wait=True)
         with patch("service.MotorSchedule.load", return_value=service.MotorSchedule()):
-            self.app = await service.create_app(self.root, learning_enabled=learning_enabled, high_wind_gate=False)
+            self.app = await service.create_app(self.root, learning_enabled=learning_enabled, high_wind_gate=high_wind_gate)
         self.state = self.app[service.STATE]
         self.state["settings"]["manual_level"] = None
         self.state["fan"] = matched_fan()
@@ -256,6 +266,54 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projected, dict(physical, confirmed=False, execution="pending"))
         self.assertEqual(self.state["fan"], physical)
 
+    async def test_completed_high_wind_cap_confirms_current_fan_and_releases_idle_epoch(self):
+        await self.open_app(high_wind_gate=True)
+        controller = self.state["controller"]
+        actual = 10
+        for now in range(0, 25, 3):
+            data = telemetry(1000 + now)
+            data["cpu_percent"] = 35 if now < 24 else 0
+            data["temperatures"]["acpi"][0]["temp"] = 70 + now / 3 if now < 24 else 45
+            nodes = [normalize(host, data, now, 1000 + now) for host in service.HOSTS]
+            decision = controller.decide(nodes, now, minimum_level=0,
+                feedback=matched_fan(actual, now, 1000 + now))
+            actual = decision["level"]
+        self.assertEqual((actual, decision["execution_trial"]["to"],
+                          decision["execution_trial"]["status"]), (10, 16, "confirmed"))
+        historical = deepcopy(controller._policy["operation"])
+        self.mono, self.wall = 27, 1027
+        self.state.update(decision=decision, fan_request=service.FanRequest(10),
+            fan=matched_fan(10, 27, 1027), last_fan=27, last_poll=27, nodes=nodes)
+        public = await self.public()
+        self.assertEqual((public["requested_level"], public["fan"]["level"],
+                          public["fan"]["execution"], public["fan"]["confirmed"]),
+                         (10, 10, "matched", True))
+        policy = deepcopy(controller._policy)
+        physical = deepcopy(self.state["fan"])
+        budget = deepcopy(vars(self.state["motor_schedule"]))
+        settings = deepcopy(self.state["settings"])
+        for _ in range(10):
+            self.assertTrue((await self.public())["fan"]["confirmed"])
+        self.assertEqual(controller._policy, policy)
+        self.assertEqual(self.state["fan"], physical)
+        self.assertEqual(vars(self.state["motor_schedule"]), budget)
+        self.assertEqual(self.state["settings"], settings)
+        release = []
+        for now in range(27, 211, 3):
+            self.mono, self.wall = now, 1000 + now
+            self.state.update(fan=matched_fan(10, now, 1000 + now), last_fan=now)
+            row = await self.sample()
+            if row["requested_level"] < 10:
+                release.append((now, row["requested_level"]))
+                break
+            self.assertTrue(row["fan"]["confirmed"])
+            self.assertEqual(controller._policy["operation"], historical)
+        self.assertEqual([level for _, level in release], [7])
+        self.assertGreaterEqual(release[0][0], 90)
+        self.assertIsNone(controller.operating.workload_epoch)
+        self.assertEqual(row["decision"]["execution_trial"]["status"], "pending")
+        self.assertFalse(row["fan"]["confirmed"])
+
     async def test_status_actual_r2_transitions_preserve_physical_evidence_and_deadline(self):
         rows = json.loads(Path(__file__).with_name(
             "test_fan_snapshot_transitions.json").read_text(encoding="utf-8"))["changes_and_final_rows"]
@@ -264,6 +322,10 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 self.mono, self.wall = row["learning"]["mono"], row["snapshot_at"]
                 self.state.update(fan=deepcopy(row["fan"]), decision=deepcopy(row["decision"]),
                                   last_fan=self.mono, last_poll=self.mono)
+                trial = row["decision"]["execution_trial"]
+                self.state["controller"]._policy["operation"] = operation(trial["to"],
+                    trial["destination_requested_at"], requested_at=trial["requested_at"])
+                self.assertIsNotNone(self.state["controller"]._policy["operation"])
                 publish_test_request(self.state)
                 physical, decision = deepcopy(self.state["fan"]), deepcopy(self.state["decision"])
                 debt = deepcopy(vars(self.state["motor_schedule"]))
@@ -297,13 +359,16 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(result["fan"]["confirmed"], True)
 
     async def test_status_strict_equal_nonfinite_future_and_malformed_current_provenance(self):
-        bad_trials = [{}, "old", False, [], execution(14, 98), execution(True, 98)]
-        bad_trials += [execution(15, stamp) for stamp in
+        bad_trials = [{}, "old", False, [], operation(14, 98), operation(True, 98)]
+        bad_trials += [operation(15, stamp) for stamp in
                        (None, True, "98", math.nan, math.inf, -math.inf, 99, 100, 101)]
         for trial in bad_trials:
             with self.subTest(trial=trial):
                 self.state.update(fan=matched_fan(15),
-                    decision=dict(level=15, execution_trial=trial, trial=execution(15, 90)))
+                    decision=dict(level=15, execution_trial=execution(15), trial=execution(15, 90)))
+                self.state["controller"]._policy["operation"] = (trial if isinstance(trial, dict)
+                    else dict(operation(15, 98), status=trial))
+                self.assertIsNotNone(self.state["controller"]._policy["operation"])
                 publish_test_request(self.state)
                 physical = deepcopy(self.state["fan"])
                 result = await self.public()
@@ -312,14 +377,30 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(observation=stamp):
                 self.state.update(fan=matched_fan(16, stamp),
                                   decision=dict(level=16, execution_trial=execution(16, 98)))
+                self.state["controller"]._policy["operation"] = operation(16, 98)
                 publish_test_request(self.state)
                 result = await self.public()
                 self.assertEqual(result["requested_level"], 16)
                 self.assertIs(result["fan"]["confirmed"], False)
                 self.assertEqual(result["fan"]["execution"], "pending")
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15, 98)))
+        self.state["controller"]._policy["operation"] = operation(15, 98)
         publish_test_request(self.state)
         self.assertEqual((await self.public())["fan"], self.state["fan"])
+
+    async def test_timeout_history_does_not_bind_a_different_current_target(self):
+        historical = operation(16, 90, status="execution_timeout", outcome="execution_timeout")
+        self.state["controller"]._policy["operation"] = historical
+        self.state.update(fan=matched_fan(10), decision=dict(level=10,
+            execution_trial=Controller._trial_view(historical, execution=True)))
+        publish_test_request(self.state)
+        before = deepcopy(historical)
+        public = await self.public()
+        self.assertEqual((public["requested_level"], public["fan"]["level"],
+                          public["fan"]["execution"], public["fan"]["confirmed"]),
+                         (10, 10, "matched", True))
+        self.assertEqual(self.state["controller"]._policy["operation"], before)
+        self.assertEqual(public["decision"]["execution_trial"]["outcome"], "execution_timeout")
 
     async def test_status_never_upgrades_pending_fault_unknown_or_completed_old_ack(self):
         for outcome in ("pending", "fault", "unknown", None):
@@ -327,12 +408,15 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 physical = dict(matched_fan(15), execution=outcome, confirmed=False,
                                 fault=outcome == "fault")
                 self.state.update(fan=physical, decision=dict(level=15, execution_trial=execution(15, 98)))
+                self.state["controller"]._policy["operation"] = operation(15, 98)
                 publish_test_request(self.state)
                 result = await self.public()
                 self.assertEqual(result["fan"], physical)
                 self.assertIs(result["fan"]["confirmed"], False)
         self.state.update(fan=matched_fan(15), decision=dict(level=15,
             execution_trial=dict(execution(15, 100), status="confirmed"), trial=execution(15, 90)))
+        self.mono = 101
+        self.state["controller"]._policy["operation"] = operation(15, 100, status="confirmed")
         publish_test_request(self.state)
         self.assert_evidence((await self.public())["fan"], deepcopy(self.state["fan"]))
 
@@ -344,6 +428,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                     controller._request(gear, gear, 100, None, purpose="reserve", profile="ordinary")
                     self.assertIsNone(controller._decision("hold", "same actual")["execution_trial"])
                     self.state.update(fan=matched_fan(gear), decision=dict(level=gear, **metadata))
+                    self.state["controller"] = controller
                     publish_test_request(self.state)
                     result = await self.public()
                     self.assertEqual(result["requested_level"], gear)
@@ -375,6 +460,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_monitor_projects_feedback_before_decide_and_does_not_sanitize_bad_faults(self):
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15)))
+        self.state["controller"]._policy["operation"] = operation(15)
         publish_test_request(self.state)
         physical = deepcopy(self.state["fan"])
         with patch.object(self.state["controller"], "decide", wraps=self.state["controller"].decide) as decide:
@@ -398,7 +484,10 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         new = dict(level=15, execution_trial=execution(15), scenario="steady", learning_eligible=True,
                    trend_complete=dict.fromkeys(service.HOSTS, True),
                    rise_c_per_min=dict.fromkeys(service.HOSTS, 0))
-        with patch.object(self.state["controller"], "decide", return_value=deepcopy(new)) as decide:
+        def new_intent(*args, **kwargs):
+            self.state["controller"]._policy["operation"] = operation(15)
+            return deepcopy(new)
+        with patch.object(self.state["controller"], "decide", side_effect=new_intent) as decide:
             row = await self.sample()
         self.assertEqual(decide.call_args.kwargs["power_thresholds"], policy)
         self.assertEqual(decide.call_args.kwargs["feedback"], physical)
@@ -424,6 +513,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         policy = self.install_policy()
         self.assertEqual((await self.public())["learning"]["active"], policy)
         self.state.update(fan=matched_fan(15), decision=dict(level=15, execution_trial=execution(15)))
+        self.state["controller"]._policy["operation"] = operation(15)
         publish_test_request(self.state)
         with patch.object(self.state["controller"], "decide", return_value=deepcopy(self.state["decision"])) as decide:
             row = await self.sample()
@@ -483,6 +573,60 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["decision"]["execution_trial"]["status"], "confirmed")
         self.assertEqual(row["decision"]["execution_trial"]["original_deadline"], 190)
         self.assertEqual(controller.level, 15)
+
+
+class FeedbackProvenanceTests(unittest.TestCase):
+    def test_completed_same_target_requires_strictly_post_request_feedback(self):
+        for status in ("pending", "confirmed", "observing"):
+            controller = Controller(service.HOSTS)
+            completed = operation(10, 98)
+            completed.update(status=status, episode=None, confirmed_at=98.1)
+            controller._policy["operation"] = completed
+            for stamp, expected in ((97, False), (98, False), (99, True)):
+                with self.subTest(status=status, stamp=stamp):
+                    self.assertEqual(controller.feedback_matches_request(10, stamp, 100), expected)
+
+    def test_pending_retarget_and_aba_keep_the_original_deadline(self):
+        controller = Controller(service.HOSTS)
+        controller._request(15, 16, 90, None, purpose="release", profile="ordinary")
+        for now, target in ((100, 16), (101, 15), (102, 16)):
+            controller._request(target, 16, now, None, purpose="rollback", profile="ordinary")
+            self.assertEqual(controller._policy["operation"]["outcome"], "invalidated")
+            self.assertFalse(controller.feedback_matches_request(target, now, now + .1))
+            self.assertTrue(controller.feedback_matches_request(target, now + .1, now + .1))
+            self.assertFalse(controller.feedback_matches_request(10, now + .1, now + .1))
+            self.assertEqual(controller._policy["operation"]["episode"].original_deadline, 150)
+        self.assertTrue(controller.feedback_matches_request(16, 149, 149))
+        self.assertFalse(controller.feedback_matches_request(16, 150, 150))
+        self.assertEqual(controller._policy["operation"]["episode"].original_deadline, 150)
+
+    def test_malformed_authoritative_records_fail_closed_without_mutating(self):
+        bad = [{}, "old", False, []]
+        for key, values in (("episode", ({}, "old", False)),
+                            ("status", ("unknown", None, False, [])),
+                            ("outcome", ("unknown", False, [])),
+                            ("destination", (True, -1, 17, "10")),
+                            ("destination_requested_at", (None, True, "98", math.nan, math.inf, -math.inf, 101))):
+            bad.extend(dict(operation(10, 98, status="confirmed"), **{key: value}) for value in values)
+        for missing in ("episode", "status", "outcome", "destination", "destination_requested_at", "confirmed_at"):
+            value = operation(10, 98, status="confirmed")
+            del value[missing]
+            bad.append(value)
+        pending = operation(10, 98)
+        original = pending["episode"]
+        for requested_at, deadline in ((True, 150), (math.nan, 150), (99, 150),
+                                       (90, True), (90, math.inf), (90, 98)):
+            episode = type(original)(16, 10, requested_at, deadline)
+            bad.append(dict(pending, episode=episode))
+        controller = Controller(service.HOSTS)
+        for value in bad:
+            with self.subTest(operation=value):
+                controller._policy["operation"] = value
+                self.assertFalse(controller.feedback_matches_request(7, 99, 100))
+                self.assertFalse(controller.feedback_matches_request(10, 99, 100))
+                self.assertIs(controller._policy["operation"], value)
+        controller._policy["operation"] = operation(10, 98, status="confirmed")
+        self.assertTrue(controller.feedback_matches_request(7, 99, 100))
 
 
 class ReadbackEpisodeTests(unittest.TestCase):

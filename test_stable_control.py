@@ -327,9 +327,9 @@ class StableServiceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(public['fan']['confirmed'])
                     self.assertEqual(public['fan']['level'], 9)
                     if now == 66:
-                        state['decision']['execution_trial']['outcome'] = 'failed'
+                        controller._policy['operation'].update(status='failed', outcome='failed')
                         self.assertTrue(json.loads((await handler(SimpleNamespace())).body)['fan']['confirmed'])
-                        state['decision']['execution_trial']['outcome'] = 'invalidated'
+                        controller._policy['operation'].update(status='invalidated', outcome='invalidated')
                     decision = controller.decide(fleet(now, cpu=49, gpu=47, board=54, power=60, load=5),
                         now, minimum_level=0, feedback=public['fan'])
                     state.update(decision=decision, fan_request=service.FanRequest(decision['level']))

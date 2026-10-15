@@ -223,6 +223,42 @@ class Controller:
     def _pending(self):
         return self._policy["operation"] is not None and self._policy["operation"].get("episode") is not None
 
+    def feedback_matches_request(self, requested_level, observed_mono, now):
+        def timestamp(value):
+            return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= now
+
+        if (type(now) not in (int, float) or not math.isfinite(now) or now < 0
+                or type(requested_level) is not int or not 0 <= requested_level <= MAX_LEVEL
+                or not timestamp(observed_mono)):
+            return False
+        operation = self._policy["operation"]
+        if operation is None:
+            return True
+        if not isinstance(operation, dict) or "episode" not in operation:
+            return False
+        destination, stamp = operation.get("destination"), operation.get("destination_requested_at")
+        status, outcome = operation.get("status"), operation.get("outcome", "unknown")
+        ended = ("invalidated", "failed", "execution_timeout", "recovery_released",
+                 "success", "manual_complete", "inconclusive_timeout")
+        if (type(destination) is not int or not 0 <= destination <= MAX_LEVEL or not timestamp(stamp)
+                or status not in ("pending", "confirmed", "observing") + ended
+                or outcome not in (None,) + ended or status in ended and outcome != status):
+            return False
+        episode = operation["episode"]
+        if episode is not None:
+            if (not isinstance(episode, _Episode) or not timestamp(episode.original_requested_at)
+                    or type(episode.original_deadline) not in (int, float)
+                    or not math.isfinite(episode.original_deadline)
+                    or not episode.original_requested_at <= stamp < episode.original_deadline
+                    or now >= episode.original_deadline):
+                return False
+        elif status in ("pending", "confirmed", "observing"):
+            confirmed = operation.get("confirmed_at")
+            if not timestamp(confirmed) or confirmed <= stamp:
+                return False
+        return ((episode is None and destination != requested_level)
+                or destination == requested_level and stamp < observed_mono)
+
     def _finish_trial(self, outcome):
         if self.trial is not None and (self.trial["outcome"] is None or
                                       outcome in ("invalidated", "failed") and self.trial["outcome"] in

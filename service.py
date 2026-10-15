@@ -779,16 +779,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
         if observed.get("execution") != "matched":
             return observed
         matched = (observed.get("confirmed") is True and observed.get("fault") is False
-                   and fan_healthy() and observed.get("level") == requested_level)
-        trial = state["decision"].get("execution_trial")
-        retired = (isinstance(trial, dict) and trial.get("status") != "pending"
-                   and trial.get("outcome") in ("invalidated", "failed"))
-        if trial is not None and not retired:
-            destination = trial.get("to") if isinstance(trial, dict) else None
-            stamp = trial.get("destination_requested_at") if isinstance(trial, dict) else None
-            matched = (matched and type(destination) is int and destination == requested_level
-                       and type(stamp) in (int, float) and math.isfinite(stamp)
-                       and 0 <= stamp < observed["observed_mono"] <= time.monotonic())
+                   and fan_healthy() and observed.get("level") == requested_level
+                   and state["controller"].feedback_matches_request(
+                       requested_level, observed.get("observed_mono"), time.monotonic()))
         if not matched:
             observed.update(execution="pending", confirmed=False)
         return observed
