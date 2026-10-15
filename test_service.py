@@ -929,7 +929,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                     await tasks_release.wait()
                     tasks_drained.set()
 
-                def final_fan(device, target, schedule):
+                def final_fan(device, target, schedule, *, read_only=None):
                     self.assertTrue(tasks_drained.is_set())
                     self.assertTrue(state["fan_lock"].locked())
                     self.assertIs(device, state["device"])
@@ -1595,7 +1595,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state["device"] = FakeFan()
         state["last_identity"] = time.monotonic()
         fan_loop = dict(zip(self.startup.__code__.co_freevars, (cell.cell_contents for cell in self.startup.__closure__)))["fan"]
-        def worker(device, target, schedule):
+        def worker(device, target, schedule, *, read_only=None):
             entered.set()
             if not release.wait(3):
                 raise AssertionError("fan barrier release missing")

@@ -155,6 +155,16 @@ evaluate('render(status)');
 const motorAlarm = get('alarm').textContent;
 const saved = JSON.parse(JSON.stringify(context.status));
 context.status.nodes = Array.from({length:4}, (_, i)=>({host:['192.168.3.180','192.168.3.181','192.168.3.183','192.168.3.184'][i],
+  online:true, sampled_at:102, cpu_temp:48, gpu_temp:44, board_temp:53}));
+Object.assign(context.status, {requested_level:8, decision:{scenario:'readback_hold', scenario_detail:'设备读回短暂中断，保持至少8档，暂停降档'}});
+Object.assign(context.status.fan, {level:null, rpm:null, confirmed:false, execution:'pending', verified_at:null});
+evaluate('render(status)');
+assert.match(get('alarm').textContent, /读回暂时中断.*8 档.*暂停降档/);
+assert.equal(get('actual').textContent, '未确认');
+assert.equal(get('rpm').textContent, '尚无有效转速读回');
+assert.ok(!get('alarm').textContent.includes('16 档全风请求已匹配'));
+context.status = JSON.parse(JSON.stringify(saved));
+context.status.nodes = Array.from({length:4}, (_, i)=>({host:['192.168.3.180','192.168.3.181','192.168.3.183','192.168.3.184'][i],
   online:true, sampled_at:102, cpu_temp:60, gpu_temp:40, board_temp:50}));
 Object.assign(context.status, {requested_level:10, decision:{scenario:'graded_hold', limits:{cpu:[60,75],gpu:[60,75],board:[65,75]}}});
 Object.assign(context.status.fan, {level:10, confirmed:true, execution:'matched', rpm:900});

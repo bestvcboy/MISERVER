@@ -763,6 +763,16 @@ class Controller:
         changed = self.mode is not None and self.mode != caller
         self.mode = caller
         healthy = self._feedback_valid(frame["feedback"], now)
+        hold = frame["feedback"].get("readback_hold") if isinstance(frame["feedback"], dict) else None
+        hold = (hold if isinstance(hold, dict) and type(hold.get("level")) is int
+                and 0 <= hold["level"] <= MAX_LEVEL and type(hold.get("until")) in (int, float)
+                and math.isfinite(hold["until"]) and now < hold["until"]
+                and frame["feedback"].get("fault") is False
+                and not frame["feedback"].get("protection_interrupted")
+                and (not self._pending() or policy["operation"].get("readback_floor") == hold["level"]
+                     and policy["operation"]["episode"].original_from == hold["level"]
+                     and policy["operation"]["destination"] > hold["level"])
+                and not policy["startup_required"] else None)
         if not healthy:
             self.power_exposure.clear()
         actual = frame["feedback"]["level"] if healthy else self.level
@@ -882,7 +892,7 @@ class Controller:
             reasons.insert(0, "[feedback] 原请求60s执行截止已到期，晚到确认不能消除超时")
             return result("protect", f"execution_timeout original_deadline={episode.original_deadline:g}，请求16并重建启动证据")
 
-        if frame["telemetry_fault"] or not healthy or frame["thermal_risk"]:
+        if frame["telemetry_fault"] or not healthy and hold is None or frame["thermal_risk"]:
             fault = frame["telemetry_fault"] or not healthy
             self._finish_trial("failed" if attributable and frame["thermal_risk"] else "invalidated")
             self._retire_search()
@@ -906,6 +916,21 @@ class Controller:
             if not healthy:
                 reasons.insert(0, "[feedback] 净化器实际反馈未知、过期或异常，有效期<=9s，全风请求尚不代表执行")
             return result("protect", "保护请求16，等待当前目的档位匹配读回及当前安全证据")
+
+        if hold is not None:
+            self._finish_trial("invalidated")
+            self._retire_search()
+            self._retire_guards()
+            policy.update(state=dict(tag="readback_hold"), rebound=None, last_downward=None)
+            policy["learning_window"].clear()
+            policy["learning_key"] = None
+            destination = max(self.level, hold["level"], reserve)
+            self._request(destination, hold["level"], now, context, purpose="reserve", profile="ordinary")
+            if self._pending():
+                policy["operation"]["readback_floor"] = hold["level"]
+            self.phase = "hold"
+            return result("readback_hold", f"{'读回已恢复，等待两次间隔3秒的匹配观察' if hold.get('recovering') else '设备读回短暂中断'}；"
+                          f"保持至少{hold['level']}档，暂停降档 failures={hold.get('failures')} remaining={hold['until'] - now:g}s")
 
         if self._pending():
             trial = policy["operation"]

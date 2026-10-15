@@ -65,6 +65,80 @@ class LocalTelemetry:
 
 
 class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_readback_hold_upward_request_publishes_recovery_before_write(self):
+        class MissingOnce(FakeFan):
+            missing = True
+            def send(self, command, properties):
+                if self.missing:
+                    self.missing = False
+                    raise TimeoutError("one missing reply")
+                return super().send(command, properties)
+        self.state.update(fan=matched_fan(8), decision=dict(level=8, reasons=[], scenario="hold"),
+                          device=MissingOnce(["on", "favorite", 8, 1500]), last_identity=self.mono)
+        self.state["controller"].level = 8
+        self.state["controller"]._policy["startup_required"] = False
+        startup = self.app.on_startup[-1]
+        fan = dict(zip(startup.__code__.co_freevars,
+            (cell.cell_contents for cell in startup.__closure__)))["fan"]
+        async def once():
+            self.state["stop"] = False
+            async def stop(delay):
+                self.state["stop"] = True
+            with patch("service.asyncio.sleep", stop):
+                await fan()
+        await once()
+        self.state["settings"]["manual_level"] = 10
+        row = await self.sample()
+        self.assertEqual((row["requested_level"], row["decision"]["scenario"]), (10, "readback_hold"))
+        deadline = row["decision"]["execution_trial"]["original_deadline"]
+        self.mono, self.wall = 103, 1003
+        await once()
+        value = await self.public()
+        self.assertEqual((value["requested_level"], value["fan"]["level"]), (10, 8))
+        self.assertFalse(value["fan"]["confirmed"])
+        self.assertEqual(self.state["device"].writes, [])
+        self.assertEqual(value["decision"]["execution_trial"]["original_deadline"], deadline)
+        self.mono, self.wall = 106, 1006
+        await once()
+        value = await self.public()
+        self.assertEqual((value["requested_level"], value["fan"]["level"]), (10, 10))
+        self.assertEqual(self.state["device"].writes, [10])
+        self.assertEqual(value["decision"]["execution_trial"]["original_deadline"], deadline)
+
+    async def test_single_transport_read_failure_holds_without_motor_write(self):
+        class Missing(FakeFan):
+            def send(self, command, properties):
+                raise TimeoutError("one missing reply")
+        self.state.update(fan=matched_fan(8), decision=dict(level=8, reasons=[], scenario="hold"),
+                          device=Missing(), last_identity=self.mono)
+        self.state["controller"].level = 8
+        self.state["controller"]._policy["startup_required"] = False
+        startup = self.app.on_startup[-1]
+        fan = dict(zip(startup.__code__.co_freevars,
+            (cell.cell_contents for cell in startup.__closure__)))["fan"]
+        async def stop(delay):
+            self.state["stop"] = True
+        with patch("service.asyncio.sleep", stop):
+            await fan()
+        value = await self.public()
+        self.assertEqual(value["requested_level"], 8)
+        self.assertIsNone(value["fan"]["level"])
+        self.assertFalse(value["fan"]["confirmed"])
+        self.assertEqual(self.state["device"].writes, [])
+        for field, forced in (("storage_error", "disk"), ("settings_error", "settings"),
+                              ("pairing", True), ("force_max", True)):
+            with self.subTest(urgent=field):
+                original = self.state[field]
+                self.state[field] = forced
+                self.assertEqual((await self.public())["requested_level"], 16)
+                self.state[field] = original
+        self.state["motor_schedule"].fault = True
+        self.assertEqual((await self.public())["requested_level"], 16)
+        self.state["motor_schedule"].fault = False
+        row = await self.sample()
+        self.assertEqual((row["requested_level"], row["decision"]["scenario"]), (8, "readback_hold"))
+        self.assertIsNone(row["fan"]["level"])
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -317,6 +391,134 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["decision"]["execution_trial"]["status"], "confirmed")
         self.assertEqual(row["decision"]["execution_trial"]["original_deadline"], 190)
         self.assertEqual(controller.level, 15)
+
+
+class ReadbackEpisodeTests(unittest.TestCase):
+    def setUp(self):
+        self.episode = service.ReadbackEpisode()
+        self.good(100)
+
+    def good(self, now, eligible=True):
+        self.episode.accept(matched_fan(8, now, 1000 + now), now, 8, eligible=eligible)
+
+    def bad(self, now, **changes):
+        value = dict(readback_failure="initial_transport", fault=False, protection_interrupted=False)
+        value.update(changes)
+        self.episode.accept(value, now, 8, eligible=True)
+
+    def test_attempt_count_and_absolute_expiry_are_not_extended_by_readers(self):
+        self.bad(103)
+        first = self.episode.published
+        for _ in range(100):
+            self.assertEqual(self.episode.assessment(105), first)
+        self.bad(106)
+        self.assertEqual(self.episode.assessment(114.99).failures, 2)
+        self.assertIsNone(self.episode.assessment(115))
+        self.bad(108)
+        self.assertIsNone(self.episode.assessment(108))
+
+    def test_two_spaced_replies_recover_without_resetting_blindness_budget(self):
+        self.bad(103)
+        self.good(106)
+        self.assertIsNotNone(self.episode.assessment(110))
+        self.good(107)
+        self.assertEqual(self.episode.published.recovering_at, 106)
+        self.good(109)
+        self.assertEqual(self.episode.published.failures, 0)
+        self.assertIsNone(self.episode.assessment(109))
+
+    def test_flapping_failure_retains_original_deadline(self):
+        self.bad(103)
+        self.good(106)
+        self.bad(108)
+        self.assertEqual(self.episode.published.last_good, 100)
+        self.assertEqual(self.episode.published.failures, 2)
+        self.assertIsNone(self.episode.assessment(115))
+
+    def test_observed_single_timeout_and_followup_gap_fits_bounded_grace(self):
+        self.bad(106)
+        self.assertIsNotNone(self.episode.assessment(108))
+        self.assertEqual(self.episode.published.failures, 1)
+        self.assertIsNotNone(self.episode.assessment(111.669324))
+        self.good(111.669324)
+        self.assertEqual(self.episode.published.recovering_at, 111.669324)
+        self.good(114.732755)
+        self.assertEqual(self.episode.published.failures, 0)
+
+    def test_bad_identity_payload_motor_or_postwrite_is_not_transport_grace(self):
+        for changes in (dict(readback_failure=None), dict(fault=True), dict(protection_interrupted=True)):
+            with self.subTest(changes=changes):
+                self.episode = service.ReadbackEpisode()
+                self.good(100)
+                self.bad(103, **changes)
+                self.assertIsNone(self.episode.assessment(103))
+        self.episode = service.ReadbackEpisode()
+        self.bad(103)
+        self.assertIsNone(self.episode.assessment(103))
+
+    def test_initial_transport_classification_is_narrow_and_never_writes(self):
+        from miio.exceptions import DeviceException
+        wrapped = DeviceException("no reply")
+        wrapped.__cause__ = OSError("transport")
+        for error, eligible in ((TimeoutError(), True), (OSError(), True), (wrapped, True),
+                                (ValueError(), False), (RuntimeError(), False), (DeviceException(), False)):
+            with self.subTest(error=type(error).__name__):
+                class Missing(FakeFan):
+                    def send(self, *args):
+                        raise error
+                device = Missing()
+                result = service.fan_apply(device, lambda: 8, service.MotorSchedule())
+                self.assertEqual(result.get("readback_failure") == "initial_transport", eligible)
+                self.assertEqual(device.writes, [])
+
+
+class ReadbackHoldControllerTests(unittest.TestCase):
+    def setUp(self):
+        from test_scenarios import fleet
+        self.fleet = fleet
+        self.controller = Controller(service.HOSTS)
+        self.controller.level = 8
+        self.controller._policy["startup_required"] = False
+
+    def step(self, now=103, nodes=None, **changes):
+        value = dict(configured=True, confirmed=False, level=None, rpm=None, fault=False,
+                     execution="pending", readback_hold=dict(level=8, until=109, failures=1))
+        value.update(changes)
+        return self.controller.decide(self.fleet(now) if nodes is None else nodes, now,
+                                      minimum_level=0, feedback=value)
+
+    def test_hold_is_explicit_and_does_not_manufacture_feedback_or_credit(self):
+        decision = self.step()
+        self.assertEqual((decision["level"], decision["scenario"]), (8, "readback_hold"))
+        self.assertFalse(decision["learning_eligible"])
+        self.assertIsNone(self.controller.search_anchor)
+        self.assertNotIn("earned", self.controller._policy["state"])
+        self.assertEqual(self.step(106)["level"], 8)
+        self.assertEqual(self.step(109)["level"], 16)
+
+    def test_real_temperature_telemetry_motor_and_startup_win(self):
+        for case in ("temperature", "telemetry", "motor", "startup"):
+            with self.subTest(case=case):
+                self.setUp()
+                nodes = self.fleet(103, cpu=74) if case == "temperature" else self.fleet(103)
+                if case == "telemetry":
+                    nodes[0]["online"] = False
+                if case == "startup":
+                    self.controller._policy["startup_required"] = True
+                result = self.step(nodes=nodes, **({"fault": True} if case == "motor" else {}))
+                self.assertEqual(result["level"], 16)
+
+    def test_pending_deadline_is_not_replaced_by_grace(self):
+        self.controller._request(7, 8, 100, None, purpose="probe", profile="ordinary")
+        result = self.step(160)
+        self.assertEqual(result["level"], 16)
+        self.assertEqual(result["execution_trial"]["original_deadline"], 160)
+        self.assertEqual(result["execution_trial"]["outcome"], "execution_timeout")
+
+    def test_temperature_preparation_raises_with_real_execution_episode(self):
+        result = self.step(nodes=self.fleet(103, cpu=61))
+        self.assertEqual(result["level"], 10)
+        self.assertEqual(result["execution_trial"]["original_deadline"], 163)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,9 @@ function render(data) {
   let alarm = '';
   if (!fresh) alarm = '采集循环异常。当前温度不可视为实时，保护目标保持全风。';
   else if (online < 4) alarm = '部分节点采集失败，保护目标已升至最大风力。';
+  else if (data.decision?.scenario === 'readback_hold') alarm = fanConfirmed
+    ? '设备读回已恢复，正在确认通信稳定，暂停降档。'
+    : `设备读回暂时中断，保持当前请求 ${data.requested_level} 档并暂停降档，正在重试。`;
   else if (data.decision?.scenario === 'protect' || data.nodes.some(node =>
            node.cpu_temp >= (data.decision?.limits?.cpu?.[1] ?? 75) - 2
            || node.gpu_temp >= (data.decision?.limits?.gpu?.[1] ?? 75) - 2
