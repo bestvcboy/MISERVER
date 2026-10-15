@@ -29,6 +29,7 @@
 !ops/docker/compose.yaml
 !ops/docker/controller_supervisor.py
 !ops/docker/test_controller.py
+!ops/legacy-user-guide.md
 !ops/observer/dgx-thermal-observer-candidate.service
 !ops/observer/history.py
 !ops/observer/observer.py
