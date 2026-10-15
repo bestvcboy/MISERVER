@@ -274,6 +274,163 @@ class RulesDescentTests(unittest.TestCase):
         self.assertFalse(d['learning_eligible'])
 
 
+class PredictiveReleaseTests(unittest.TestCase):
+    def test_slow_warming_far_below_target_releases_after_thirty_seconds(self):
+        c=Controller(HOSTS,rules_only=True)
+        actual=16
+        edges=[]
+        for t in range(0,154,3):
+            d=c.decide(fleet(t,cpu=40+t*.03,gpu=38,board=50,power=45),t,
+                       minimum_level=0,feedback=feedback(t,actual))
+            self.assertFalse(d["learning_eligible"])
+            if d["level"]!=actual:
+                edges.append((t,actual,d["level"]))
+            actual=d["level"]
+        self.assertTrue(edges,"low-temperature warming never received a release")
+        self.assertEqual(edges[0],(90,16,13))
+        self.assertTrue(all(b[0]-a[0]>=30 for a,b in zip(edges,edges[1:])))
+        self.assertTrue(all(0<a-b<=3 for _,a,b in edges))
+
+    def test_far_below_target_persistent_two_degree_rise_does_not_restore_full_edge(self):
+        c=Controller(HOSTS,rules_only=True)
+        actual=16
+        for t in range(0,151,3):
+            d=c.decide(fleet(t,cpu=40+max(0,t-93)*.04,gpu=38,board=50,power=45),t,
+                       minimum_level=0,feedback=feedback(t,actual))
+            if t>93:self.assertLessEqual(d["level"],13)
+            actual=d["level"]
+        self.assertLess(actual,13)
+
+    def with_frame(self, controller, adjust, decide):
+        advance=controller._advance
+        def boundary(frame):
+            adjust(frame)
+            return advance(frame)
+        with patch.object(controller,"_advance",side_effect=boundary):
+            return decide()
+
+    def test_exact_five_allows_warming_and_below_five_pauses_earned_credit(self):
+        helper=RulesDescentTests()
+        c=helper.prepared()
+        for t in range(63,88,3):helper.step(c,t,10)
+        earned=c._policy["state"]["earned"]
+        def adjust(frame):frame.update(margin=4.99,warming=True)
+        d=self.with_frame(c,adjust,lambda:helper.step(c,90,10))
+        self.assertEqual(d["level"],10)
+        self.assertEqual(c._policy["state"]["earned"],earned)
+        self.assertIn("预测余量不足5C",d["scenario_detail"])
+        def enough(frame):frame.update(margin=5,warming=True)
+        for t in (93,96,99):d=self.with_frame(c,enough,lambda:helper.step(c,t,10))
+        self.assertEqual(d["level"],8)
+        self.assertEqual(d["execution_trial"]["planned_step"],2)
+
+    def test_pending_warming_retains_exact_original_tier_and_deadline(self):
+        helper=RulesDescentTests()
+        for board,margin,expected in ((54,10,7),(54,9.99,10),(59,5,8),(59,4.99,10)):
+            with self.subTest(board=board,margin=margin):
+                c=helper.prepared(board=board)
+                for t in range(63,94,3):d=helper.step(c,t,10,board=board)
+                deadline=d["execution_trial"]["original_deadline"]
+                def adjust(frame):frame.update(margin=margin,warming=True,persistent_heat=True)
+                d=self.with_frame(c,adjust,lambda:helper.step(c,96,10,board=board))
+                self.assertEqual(d["level"],expected)
+                self.assertEqual(d["execution_trial"]["original_deadline"],deadline)
+                self.assertFalse(d["learning_eligible"])
+
+    def test_secondary_restore_uses_same_covered_sensor_and_strict_five_degree_proximity(self):
+        helper=RulesDescentTests()
+        for projected,covered,temperature,expected in ((60,True,59,8),(60.01,True,59,10),
+                                                        (60.01,False,59,8),(60.01,True,58,8)):
+            with self.subTest(projected=projected,covered=covered,temperature=temperature):
+                c=helper.prepared(board=56)
+                for t in range(63,94,3):helper.step(c,t,10,board=56)
+                helper.step(c,96,8,board=56)
+                def adjust(frame):
+                    for sensor in frame["evidence"].values():
+                        if sensor["group"]=="board":
+                            sensor.update(temp=temperature,projected=projected,persistent_heat=True,covered=covered)
+                d=self.with_frame(c,adjust,lambda:helper.step(c,99,8,board=56))
+                self.assertEqual(d["level"],expected)
+        c=helper.prepared(board=56)
+        for t in range(63,94,3):helper.step(c,t,10,board=56)
+        helper.step(c,96,8,board=56)
+        def unrelated(frame):
+            for sensor in frame["evidence"].values():
+                if sensor["group"]=="cpu":
+                    sensor.update(temp=52,projected=52,persistent_heat=True)
+                elif sensor["group"]=="board":
+                    sensor.update(projected=60.01,persistent_heat=False)
+        d=self.with_frame(c,unrelated,lambda:helper.step(c,99,8,board=56))
+        self.assertEqual(d["level"],8)
+
+    def test_accepted_near_target_acceleration_and_hard_temperature_remain_protected(self):
+        helper=RulesDescentTests()
+        c=helper.prepared(actual=16,cpu=40,gpu=38,board=50,power=45)
+        for t in range(63,94,3):d=helper.step(c,t,16,cpu=40,gpu=38,board=50,power=45)
+        self.assertEqual(d["level"],13)
+        helper.step(c,96,13,cpu=40,gpu=38,board=50,power=45)
+        for t,cpu in ((99,42.4),(102,43.9),(105,45.4)):
+            d=helper.step(c,t,13,cpu=cpu,gpu=38,board=50,power=45)
+        self.assertEqual(d["level"],16)
+        self.assertEqual(d["execution_trial"]["purpose"],"rollback")
+        c=helper.prepared()
+        d=helper.step(c,63,10,cpu=73)
+        self.assertEqual(d["level"],16)
+        self.assertEqual(d["scenario"],"protect")
+
+    def test_real_accepted_hard_prediction_remains_immediate(self):
+        helper=RulesDescentTests()
+        c=helper.prepared(cpu=40,gpu=38,board=50,power=45)
+        protected=None
+        for t in range(63,91,3):
+            cpu=60+(t-63)*.3
+            d=helper.step(c,t,10,cpu=cpu,gpu=38,board=50,power=45)
+            if d["scenario"]=="protect":
+                protected=cpu
+                break
+        self.assertIsNotNone(protected)
+        self.assertLess(protected,70)
+        self.assertEqual(d["level"],16)
+        self.assertTrue(any("[hard]" in reason for reason in d["reasons"]))
+
+    def test_saved_accepted_59_640_projection_restores_even_at_actual_45_4(self):
+        helper=RulesDescentTests()
+        c=helper.prepared()
+        for t in range(63,94,3):helper.step(c,t,10)
+        helper.step(c,96,8)
+        def accepted(frame):
+            for sensor in frame["evidence"].values():
+                if sensor["group"]=="cpu":
+                    sensor.update(temp=45.4,projected=59.640,covered=True,persistent_heat=False)
+        d=self.with_frame(c,accepted,lambda:helper.step(c,99,8,cpu=45.4))
+        self.assertEqual(d["level"],10)
+        self.assertEqual(d["execution_trial"]["purpose"],"rollback")
+
+    def test_manual_and_legacy_learning_mode_remain_single_step(self):
+        for rules,manual in ((True,3),(False,None)):
+            with self.subTest(rules=rules,manual=manual):
+                c=Controller(HOSTS,rules_only=rules)
+                actual=16
+                edges=[]
+                for t in range(0,154,3):
+                    d=c.decide(fleet(t,cpu=40+t*.03,gpu=38,board=50,power=45),t,
+                               minimum_level=0 if manual is None else manual,
+                               manual_level=manual,feedback=feedback(t,actual))
+                    if d["level"]<actual:edges.append(actual-d["level"])
+                    actual=d["level"]
+                self.assertTrue(edges)
+                self.assertTrue(all(distance==1 for distance in edges))
+
+    def test_raw_load_revokes_even_with_large_predicted_margin(self):
+        helper=RulesDescentTests()
+        c=helper.prepared(cpu=43,gpu=41,board=51,power=45)
+        for t in range(63,94,3):d=helper.step(c,t,10,cpu=43,gpu=41,board=51,power=45)
+        deadline=d["execution_trial"]["original_deadline"]
+        d=helper.step(c,96,10,cpu=43,gpu=41,board=51,power=45,load=30)
+        self.assertEqual(d["level"],10)
+        self.assertEqual(d["execution_trial"]["original_deadline"],deadline)
+
+
 class AuthorizedMotorTests(unittest.TestCase):
     def setUp(self):
         self.now=100

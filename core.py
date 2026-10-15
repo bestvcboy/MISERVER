@@ -792,6 +792,12 @@ class Controller:
             self.power_exposure.clear()
         return self._advance(frame)
 
+    @staticmethod
+    def _rules_warming_veto(frame):
+        sustained = frame["warming"] or frame["persistent_heat"] or any(
+            sensor["slope"] >= .02 for sensor in frame["evidence"].values())
+        return frame["margin"] < 5 and sustained
+
     def _advance_rules(self, frame, *, reserve, valid, matched, advancing, changed, continuity_lost):
         now, actual = frame["now"], frame["actual"]
         policy, evidence = self._policy, frame["evidence"]
@@ -808,7 +814,8 @@ class Controller:
         danger = any(s["covered"] and s["projected"] >= s["target"] - 2
                      for s in evidence.values())
         risen = (comparable and any(
-            s["persistent_heat"] and s["temp"] - edge["reference"].get((key[0], key[1]), s["temp"]) > 2
+            s["covered"] and s["persistent_heat"] and s["projected"] > s["target"] - 5
+            and s["temp"] - edge["reference"].get((key[0], key[1]), s["temp"]) > 2
             for key, s in evidence.items()))
         if comparable and (danger or risen):
             self._finish_trial("failed")
@@ -834,12 +841,11 @@ class Controller:
         reset = (changed or continuity_lost or not valid or actual != self.level)
         if reset:
             policy["state"] = dict(tag="rules_release")
-        sustained = frame["warming"] or frame["persistent_heat"] or any(
-            s["slope"] >= .02 for s in evidence.values())
+        warming_veto = self._rules_warming_veto(frame)
         eligible = (valid and matched and advancing and not reset and bool(evidence)
             and all(s["covered"] for s in evidence.values()) and self._workload_mean(now, 30) is not None
             and not frame["power_warning"] and not frame["power_guard"] and not frame["load_event"]
-            and not frame["target_risk"] and not frame["uncertain"] and not sustained)
+            and not frame["target_risk"] and not frame["uncertain"] and not warming_veto)
         margin = frame["margin"]
         required, step = (30, 3) if margin >= 10 else (30, 2) if margin >= 5 else (60, 1)
         if frame["manual"] is not None:
@@ -854,7 +860,7 @@ class Controller:
         for active, reason in ((not valid, "温度或匹配读回证据不足"),
                 (frame["power_warning"], "即时功耗警告"), (frame["power_guard"], "持续功耗保护"),
                 (frame["load_event"], "即时负载事件"), (frame["uncertain"], "温度变化待确认"),
-                (sustained, "持续升温"), (frame["target_risk"], "目标温度风险"),
+                (warming_veto, "持续升温且预测余量不足5C"), (frame["target_risk"], "目标温度风险"),
                 (margin < 3, "目标余量低于3C"), (actual <= reserve, "已达当前真实保底")):
             if active:
                 pauses.append(reason)
@@ -1068,8 +1074,7 @@ class Controller:
                                            5 if episode.planned_step == 2 else 3)
                      or frame["power_warning"] or frame["power_guard"]
                      or frame["target_risk"] or frame["uncertain"] or frame["load_event"]
-                     or frame["persistent_heat"] or frame["warming"]
-                     or any(s["slope"] >= .02 for s in frame["evidence"].values())))
+                     or self._rules_warming_veto(frame)))
             if rules_authority_lost:
                 workload_reason = self._workload_increase(trial["reference"], means)
                 reasons.append("[rules-release] 撤销下降权限：" +

@@ -52,7 +52,7 @@ class HistoryUITests(unittest.TestCase):
             self.assertNotIn(retired, html)
         for policy in ('CPU / GPU 60°C 准备至少 10 档', '70°C 且当前可信持续上升',
                        '绝对硬线为 75°C', '73°C 实温预缓冲', '≥10°C 观察 30 秒最多降 3 档',
-                       '≥5°C 观察 30 秒最多降 2 档', '3–5°C 观察 60 秒降 1 档', '不计容量学习'):
+                       '≥5°C 观察 30 秒最多降 2 档', '3–5°C 观察 60 秒降 1 档', '预测余量至少 5°C 时，升温趋势本身不阻止下降', '不计容量学习'):
             self.assertIn(policy, html)
 
     def test_ambient_history_projects_public_fields_and_preserves_raw_monotonic(self):
