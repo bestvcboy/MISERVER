@@ -24,7 +24,7 @@ from miio import AirPurifier
 from miio.exceptions import DeviceException
 from miio.integrations.airpurifier.zhimi.airpurifier import OperationMode
 
-from core import Controller, HighWindAuthority, MotionAuthority, HistoryLimit, Journal, MAX_LEVEL, normalize
+from core import Controller, HighWindAuthority, MotionAuthority, HistoryLimit, Journal, MAX_LEVEL, HIGH_WIND_TTL, normalize
 from learning import BUCKET, Learning, WINDOW, checkpoint_limit, context_of
 from qr_connector import BIND_CONSENT, START_CONSENT, QRError, QRConnector, strict_json
 
@@ -369,9 +369,8 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             raise ValueError("请求档位必须为 0 到 16 的整数")
         if type(request.limit) is not int or request.limit not in (10, MAX_LEVEL):
             raise ValueError("风力授权上限无效")
-        authorized = (isinstance(request.high_wind, HighWindAuthority) and request.high_wind.allowed
-            and request.high_wind.observed_mono is not None
-            and 0 <= time.monotonic() - request.high_wind.observed_mono < 6)
+        authorized = (isinstance(request.high_wind, HighWindAuthority)
+                      and request.high_wind.valid_at(time.monotonic()))
         ceiling = min(ceiling, request.limit, MAX_LEVEL if not high_wind_gate or authorized else 10)
         return FanRequest(min(request.level, ceiling), request.protected, request.release,
                           request.read_only_floor, request.upward_only, ceiling, request.high_wind, request.motion)
@@ -896,7 +895,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 "high_wind_limit": state["controller"].effective_limit(time.monotonic()),
                 "high_wind_witness": state["controller"].high_wind.witness
                     if state["controller"].effective_limit(time.monotonic()) > 10 else None,
-                "high_wind_expires_mono": state["controller"].high_wind.observed_mono + 6
+                "high_wind_expires_mono": state["controller"].high_wind.observed_mono + HIGH_WIND_TTL
                     if state["controller"].high_wind.allowed else None,
                 "requested_level": requested_level, "settings_pending": state["settings_task"] is not None,
                 "read_only": False, "control_mode": "auto" if state["settings"]["manual_level"] is None else "manual",

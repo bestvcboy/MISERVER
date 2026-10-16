@@ -39,7 +39,7 @@ function render(data) {
   $('live-dot').style.background = fresh ? '#47dfb6' : '#ff8791';
   $('updated').textContent = data.updated_at ? `更新于 ${new Date(data.updated_at * 1000).toLocaleTimeString('zh-CN')}` : '等待采样';
   $('policy').textContent = data.settings.manual_level === null ? '已保存 · 自动预防性温控' : `已保存 · 手动 ${data.settings.manual_level} 档`;
-  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision) + (data.high_wind_gate ? ` 当前风力上限 ${data.high_wind_limit} 档。${data.high_wind_limit > 10 ? "可信温度已达70°C且连续升温，临时允许高风力。" : "常规、负载及通信异常均不请求10档以上。"}` : "");
+  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision) + (data.high_wind_gate ? ` 当前风力上限 ${data.high_wind_limit} 档。${data.high_wind_limit > 10 ? "当前可信实温至少80°C，允许高风力；高温平台或降温但仍达80°C不会因趋势改变撤权。" : "没有新鲜可信的80°C高温证据，请求不超过10档。实际档位以受限执行和转速读回为准。"}` : "");
   renderLearning(data.learning || {});
   $('desired').textContent = data.requested_level;
   $('gear-bar').innerHTML = Array.from({length:16}, (_, index) => `<i class="${index < data.requested_level ? 'on' : ''}"></i>`).join('');
@@ -116,7 +116,7 @@ function renderLearning(learning) {
   if (learning.enabled === false) {
     $('learning-state').textContent = '纯规则自动温控 · 机器学习已暂停';
     $('learning-published').textContent = '已有学习阈值不参与控制，使用固定功耗、温度趋势和故障保护规则。';
-    $('learning-candidate').textContent = '每次降档至少间隔 30 秒；目标余量 ≥10°C 最多降 3 档，≥5°C 最多降 2 档，3–5°C 观察 60 秒降 1 档。仍需有效采样与实际设备确认。';
+    $('learning-candidate').textContent = '自动每次只降 1 档，先取得至少 180 秒完整合格观察；实际正转速确认后重新观察。空闲目标余量至少 5°C，非空闲至少 8°C；不因安全档吹凉或时间经过清除失败低档记忆。';
     $('learning-schedule').textContent = '不训练、不评估、不发布学习参数；旧学习记录保留。';
     $('learning-storage').textContent = `保留学习文件 ${numeric((learning.preserved_bytes || 0) / 1048576, 2)} MiB；容量内预留 ${numeric((learning.reserved_bytes || 0) / 1048576, 2)} MiB。原始温度、负载和风力历史继续记录。`;
     return;

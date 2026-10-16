@@ -586,20 +586,20 @@ class TransportProtectionTests(unittest.TestCase):
 
 
 class HighWindAuthorityTests(unittest.TestCase):
-    def test_only_three_fresh_rising_hot_samples_allow_above_ten(self):
+    def test_current_eighty_sample_allows_above_ten_without_rise_history(self):
         c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         levels = []
-        for now, temp in ((0, 68), (3, 69), (6, 70)):
+        for now, temp in ((0, 68), (3, 69), (6, 80)):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             levels.append(d["level"])
-        self.assertEqual(levels, [10, 10, 12])
+        self.assertEqual(levels, [10, 10, 16])
         self.assertEqual(d["demand"], 16)
         self.assertEqual(d["high_wind_limit"], 16)
         self.assertEqual(c.effective_limit(11.999), 16)
         self.assertEqual(c.effective_limit(12), 10)
         self.assertEqual(c.effective_limit(12.001), 10)
 
-    def test_plateau_single_spike_and_subseventy_never_authorize_high_wind(self):
+    def test_sub_eighty_plateau_spike_and_rise_never_authorize_high_wind(self):
         for temps in ((73, 73, 73), (43, 43, 74), (66, 67, 69), (70, 71, 71)):
             c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
             for now, temp in zip((0, 3, 6), temps):
@@ -609,11 +609,11 @@ class HighWindAuthorityTests(unittest.TestCase):
 
     def test_independent_hot_source_can_authorize_despite_another_missing_node(self):
         c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
-        for now, temp in ((0, 68), (3, 69), (6, 70)):
+        for now, temp in ((0, 68), (3, 69), (6, 80)):
             nodes = fleet(now, cpu=temp)
             nodes[1].update(online=False, failure_kind="transport", cpu_temp=None, gpu_temp=None, board_temp=None, sensors=[])
             d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-        self.assertEqual(d["level"], 12)
+        self.assertEqual(d["level"], 16)
         self.assertEqual(d["demand"], 16)
         self.assertTrue(c.high_wind.allowed)
 
@@ -626,42 +626,44 @@ class HighWindAuthorityTests(unittest.TestCase):
         self.assertLessEqual(d["level"], 10)
 
 
-    def test_untrusted_identity_and_ambiguity_break_the_three_sample_chain(self):
+    def test_current_identity_can_authorize_but_current_ambiguity_cannot(self):
         for changed in ("identity", "ambiguous"):
             c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
-            for now, temp in ((0, 68), (3, 69), (6, 70)):
+            for now, temp in ((0, 68), (3, 69), (6, 80)):
                 nodes = fleet(now, cpu=43)
                 hot = fleet(now, cpu=temp)[0]
                 nodes[0] = hot
                 if changed == "identity" and now == 6:
                     hot["hostname"] = "replaced-device"
-                if changed == "ambiguous" and now == 3:
+                if changed == "ambiguous" and now == 6:
                     hot["ambiguous_sensors"] = True
                 d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-            self.assertEqual(d["level"], 10)
-            self.assertFalse(c.high_wind.allowed)
+            self.assertEqual(d["level"], 16 if changed == "identity" else 10)
+            self.assertEqual(c.high_wind.allowed, changed == "identity")
+            if changed == "identity":
+                self.assertEqual(c.high_wind.witness[:2], (HOSTS[0], "replaced-device"))
 
     def test_unrelated_service_protection_does_not_erase_hot_source_evidence(self):
         c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
-        for now, temp in ((0, 68), (3, 69), (6, 70)):
+        for now, temp in ((0, 68), (3, 69), (6, 80)):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             if now < 6:
                 c.protect("unrelated communication interruption", now)
-        self.assertEqual(d["level"], 12)
+        self.assertEqual(d["level"], 16)
         self.assertTrue(c.high_wind.allowed)
         self.assertEqual(c.effective_limit(6), 16)
 
 
-    def test_absent_host_breaks_its_high_wind_sample_chain(self):
+    def test_absent_hot_host_revokes_and_current_hot_return_reauthorizes(self):
         c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
-        for now, temp in ((0, 68), (3, 69), (6, 69), (9, 70)):
+        for now, temp in ((0, 80), (3, 80), (6, 80), (9, 80)):
             nodes = fleet(now, cpu=43)
             nodes[0] = fleet(now, cpu=temp)[0]
             if now == 6:
                 nodes = nodes[1:]
             d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-        self.assertEqual(d["level"], 10)
-        self.assertFalse(c.high_wind.allowed)
+            self.assertEqual(d["high_wind_limit"], 10 if now == 6 else 16)
+        self.assertTrue(c.high_wind.allowed)
 
 
     def test_capped_protection_diagnostics_do_not_claim_a_sixteen_request(self):

@@ -45,30 +45,34 @@ class StableControlTests(unittest.TestCase):
         advancing = self.step(controller, 60, 10)
         self.assertEqual(advancing['operating']['observe_credit'], 27)
 
-    def test_confirmed_descent_observes_sixty_seconds(self):
+    def test_confirmed_descent_observes_180_seconds(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
         edges = []
-        for now in range(0, 180, 3):
+        for now in range(0, 450, 3):
             decision = self.step(controller, now, actual)
             if decision['level'] < actual:
                 edges.append((now, actual, decision['level']))
             actual = decision['level']
-        self.assertEqual(edges[0], (60, 10, 7))
-        self.assertGreaterEqual(edges[1][0] - edges[0][0], 63)
+        self.assertEqual(edges[0], (210, 10, 9))
+        self.assertGreaterEqual(edges[1][0] - edges[0][0], 183)
 
     def test_failed_floor_blocks_same_and_lower_destinations(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
-        failed = None
-        for now in range(0, 201, 3):
-            decision = self.step(controller, now, actual, cpu=58 if now == 69 else 49)
+        failed = confirmed_at = None
+        for now in range(0, 600, 3):
+            pulse = confirmed_at is not None and now == confirmed_at + 3
+            decision = self.step(controller, now, actual, cpu=58 if pulse else 49)
+            if decision['scenario'] == 'recovery_released' and confirmed_at is None:
+                confirmed_at = now
             if (decision.get('trial') or {}).get('outcome') == 'failed':
                 failed = failed or now
             actual = decision['level']
             if failed is not None:
-                self.assertGreater(actual, 7)
-        self.assertEqual(failed, 69)
+                self.assertGreater(actual, 9)
+        self.assertIsNotNone(confirmed_at)
+        self.assertEqual(failed, confirmed_at + 3)
         self.assertTrue(decision['retry_blocked'])
 
     def test_critical_witness_survives_unrelated_missing_node(self):
@@ -111,16 +115,23 @@ class StableControlTests(unittest.TestCase):
     def test_failure_is_not_cleared_by_protection_or_clock_alone(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
-        for now in range(0, 570, 3):
-            decision = self.step(controller, now, actual, cpu=58 if now == 69 else 49,
-                                 board=59 if now > 69 else 54)
+        confirmed_at = failed_at = None
+        for now in range(0, 900, 3):
+            pulse = confirmed_at is not None and now == confirmed_at + 3
+            decision = self.step(controller, now, actual, cpu=58 if pulse else 49,
+                                 board=59 if failed_at is not None else 54)
+            if decision['scenario'] == 'recovery_released' and confirmed_at is None:
+                confirmed_at = now
+            if decision['retry_blocked'] and failed_at is None:
+                failed_at = now
             actual = decision['level']
-            if now == 72:
+            if failed_at is not None and now == failed_at + 3:
                 controller.protect('storage evidence interruption', now)
-            if now >= 69:
+            if failed_at is not None:
                 self.assertTrue(decision['retry_blocked'])
-                self.assertGreater(actual, 7)
-        self.assertEqual(decision['operating']['failed_floor']['failed_at'], 69)
+                self.assertGreater(actual, 9)
+        self.assertIsNotNone(failed_at)
+        self.assertEqual(decision['operating']['failed_floor']['failed_at'], confirmed_at + 3)
 
     def test_nonidle_release_needs_180_seconds(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
@@ -136,11 +147,13 @@ class StableControlTests(unittest.TestCase):
     def test_uncommanded_actual_change_retires_failed_edge_authority(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
-        for now in range(0, 64, 3):
+        for now in range(0, 214, 3):
             decision = self.step(controller, now, actual)
             actual = decision['level']
-        self.step(controller, 66, 9)
-        decision = self.step(controller, 69, 7, cpu=58)
+        self.assertEqual(decision['scenario'], 'recovery_released')
+        confirmed_at = now
+        self.step(controller, confirmed_at + 3, 10)
+        decision = self.step(controller, confirmed_at + 6, 9, cpu=58)
         self.assertEqual(decision['trial']['outcome'], 'invalidated')
         self.assertIsNone(controller.motion.restore_level)
         self.assertFalse(decision['retry_blocked'])
@@ -161,11 +174,13 @@ class StableControlTests(unittest.TestCase):
     def test_transient_load_change_permanently_invalidates_old_edge(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
-        for now in range(0, 64, 3):
+        for now in range(0, 214, 3):
             decision = self.step(controller, now, actual)
             actual = decision['level']
-        self.step(controller, 66, 7, load=20)
-        decision = self.step(controller, 69, 7, cpu=58, load=5)
+        self.assertEqual(decision['scenario'], 'recovery_released')
+        confirmed_at = now
+        self.step(controller, confirmed_at + 3, actual, load=20)
+        decision = self.step(controller, confirmed_at + 6, actual, cpu=58, load=5)
         self.assertEqual(decision['trial']['outcome'], 'invalidated')
         self.assertIsNone(controller.motion.restore_level)
 
@@ -187,20 +202,20 @@ class HeadroomReleaseTests(unittest.TestCase):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
         edges = []
-        for now in range(0, 301, 3):
+        for now in range(0, 450, 3):
             decision = self.sample(controller, now, actual, 45 + now * .001)
             if decision['level'] < actual:
                 edges.append((now, actual, decision['level']))
             actual = decision['level']
-        self.assertEqual(edges[:2], [(60, 10, 7), (123, 7, 4)])
+        self.assertEqual(edges[:2], [(210, 10, 9), (393, 9, 8)])
 
     def test_exact_eight_allows_drift_but_below_eight_vetoes(self):
-        for board, expected in ((57, [(60, 10, 8)]), (57.001, [])):
+        for board, expected in ((57, [(210, 10, 9)]), (57.001, [])):
             with self.subTest(board=board):
                 controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
                 actual = 10
                 edges = []
-                for now in range(0, 91, 3):
+                for now in range(0, 241, 3):
                     decision = self.sample(controller, now, actual, 45 + now * .001, board)
                     if decision['level'] < actual:
                         edges.append((now, actual, decision['level']))
@@ -209,30 +224,38 @@ class HeadroomReleaseTests(unittest.TestCase):
 
     def test_pending_descent_keeps_mild_drift_but_revokes_near_target(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
-        for now in range(0, 61, 3):
+        for now in range(0, 211, 3):
             decision = self.sample(controller, now, 10, 45)
-        self.assertEqual(decision['level'], 7)
+        self.assertEqual(decision['level'], 9)
+        requested_at = now
         deadline = decision['execution_trial']['original_deadline']
-        for now in (63, 66, 69):
-            decision = self.sample(controller, now, 10, 45 + (now - 60) * .001)
-            self.assertEqual(decision['level'], 7)
+        for now in (requested_at + 3, requested_at + 6, requested_at + 9):
+            decision = self.sample(controller, now, 10, 45 + (now - requested_at) * .001)
+            self.assertEqual(decision['level'], 9)
             self.assertEqual(decision['execution_trial']['status'], 'pending')
             self.assertEqual(decision['execution_trial']['original_deadline'], deadline)
-        decision = self.sample(controller, 72, 10, 58)
+        decision = self.sample(controller, requested_at + 12, 10, 58)
         self.assertEqual(decision['trial']['outcome'], 'invalidated')
         self.assertEqual(decision['level'], 10)
 
     def test_warming_still_blocks_failed_floor_cool_requalification(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
         actual = 10
-        for now in range(0, 691, 3):
-            cpu = 58 if now == 69 else 45 if now < 69 else 45 + (now - 69) * .001
+        confirmed_at = failed_at = None
+        for now in range(0, 900, 3):
+            pulse = confirmed_at is not None and now == confirmed_at + 3
+            cpu = 58 if pulse else 45 if failed_at is None else 45 + (now - failed_at) * .001
             decision = self.sample(controller, now, actual, cpu)
+            if decision['scenario'] == 'recovery_released' and confirmed_at is None:
+                confirmed_at = now
+            if decision['retry_blocked'] and failed_at is None:
+                failed_at = now
             actual = decision['level']
-            if now >= 69:
+            if failed_at is not None:
                 self.assertTrue(decision['retry_blocked'])
-                self.assertGreater(actual, 7)
-        self.assertEqual(decision['operating']['failed_floor']['failed_at'], 69)
+                self.assertGreater(actual, 9)
+        self.assertIsNotNone(failed_at)
+        self.assertEqual(decision['operating']['failed_floor']['failed_at'], confirmed_at + 3)
 
 
 class StableWorkerTests(unittest.TestCase):
@@ -258,7 +281,7 @@ class StableWorkerTests(unittest.TestCase):
             (MotionAuthority(100, ('host', 'cpu'), 75, 75), None, 10),
             (MotionAuthority(94, ('host', 'cpu'), 75, 75), None, 4),
             (MotionAuthority(100, ('host', 'cpu'), 74, 75), None, 4),
-            (MotionAuthority(100, ('host', 'cpu'), 75, 75), HighWindAuthority(True, ('host', 'cpu'), 100), 16)):
+            (MotionAuthority(100, ('host', 'cpu'), 75, 75), HighWindAuthority(True, ('host', 'DGX', 'cpu'), 100, 80), 16)):
             device = FakeFan(['on', 'favorite', 2, 900])
             with patch.object(service.time, 'monotonic', return_value=100):
                 service.fan_apply(device, lambda: service.FanRequest(16, protected=True,
@@ -310,39 +333,44 @@ class StableServiceTests(unittest.IsolatedAsyncioTestCase):
                 controller = state['controller']
                 handler = next(r.handler for r in app.router.routes() if r.resource.canonical == '/api/status')
                 actual = 10
-                for now in range(0, 64, 3):
+                for now in range(0, 214, 3):
                     clock[0] = now
                     decision = controller.decide(fleet(now, cpu=49, gpu=47, board=54, power=60, load=5),
                         now, minimum_level=0, feedback=feedback(now, actual))
                     actual = decision['level']
-                self.assertEqual(actual, 7)
-                decision = controller.protect('transient storage interruption', 64)
-                self.assertEqual(decision['level'], 9)
-                state.update(decision=decision, fan_request=service.FanRequest(9))
+                self.assertEqual(actual, 9)
+                self.assertEqual(decision['scenario'], 'recovery_released')
+                confirmed_at = now
+                decision = controller.protect('transient storage interruption', confirmed_at + 1)
+                self.assertEqual(decision['level'], 10)
+                state.update(decision=decision, fan_request=service.FanRequest(10))
                 recovered = []
-                for now in range(66, 133, 3):
+                for now in range(confirmed_at + 3, confirmed_at + 243, 3):
                     clock[0] = now
-                    state.update(fan=matched_fan(9, now, 1000 + now), last_poll=now, last_fan=now)
+                    state.update(fan=matched_fan(10, now, 1000 + now), last_poll=now, last_fan=now)
                     public = json.loads((await handler(SimpleNamespace())).body)
                     self.assertTrue(public['fan']['confirmed'])
-                    self.assertEqual(public['fan']['level'], 9)
-                    if now == 66:
+                    self.assertEqual(public['fan']['level'], 10)
+                    if now == confirmed_at + 3:
                         controller._policy['operation'].update(status='failed', outcome='failed')
                         self.assertTrue(json.loads((await handler(SimpleNamespace())).body)['fan']['confirmed'])
                         controller._policy['operation'].update(status='invalidated', outcome='invalidated')
                     decision = controller.decide(fleet(now, cpu=49, gpu=47, board=54, power=60, load=5),
                         now, minimum_level=0, feedback=public['fan'])
                     state.update(decision=decision, fan_request=service.FanRequest(decision['level']))
-                    if decision['level'] < 9:
+                    if decision['level'] < 10:
                         recovered.append((now, decision['level']))
                         break
-                self.assertEqual(recovered, [(123, 6)])
+                self.assertEqual(len(recovered), 1)
+                self.assertGreaterEqual(recovered[0][0] - (confirmed_at + 3), 180)
+                self.assertEqual(recovered[0][1], 9)
                 self.assertEqual(decision['execution_trial']['status'], 'pending')
-                state.update(fan=matched_fan(6, 123, 1123), last_poll=123, last_fan=123)
+                requested_at = recovered[0][0]
+                state.update(fan=matched_fan(9, requested_at, 1000 + requested_at), last_poll=requested_at, last_fan=requested_at)
                 public = json.loads((await handler(SimpleNamespace())).body)
                 self.assertFalse(public['fan']['confirmed'])
-                clock[0] = 129
-                state.update(fan=matched_fan(6, 129, 1129), last_poll=129, last_fan=129)
+                clock[0] = requested_at + 6
+                state.update(fan=matched_fan(9, clock[0], 1000 + clock[0]), last_poll=clock[0], last_fan=clock[0])
                 self.assertTrue(json.loads((await handler(SimpleNamespace())).body)['fan']['confirmed'])
             finally:
                 await state['qr'].close()
