@@ -39,7 +39,7 @@ def operation(level, stamp=100, *, requested_at=90, status="pending", outcome=No
 
 
 def telemetry(wall):
-    return dict(timestamp=wall, cpu_percent=0, gpu_percent=0, system_power_w=35,
+    return dict(hostname="DGX-test", timestamp=wall, cpu_percent=0, gpu_percent=0, system_power_w=35,
                 system_power_source="spbm", temperatures=dict(gpu=40,
                     acpi=[dict(zone="0", temp=45)],
                     mlx=[dict(chip="mlx5", label="asic", temp=50)]))
@@ -273,7 +273,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         for now in range(0, 25, 3):
             data = telemetry(1000 + now)
             data["cpu_percent"] = 35 if now < 24 else 0
-            data["temperatures"]["acpi"][0]["temp"] = 70 + now / 3 if now < 24 else 45
+            data["temperatures"]["acpi"][0]["temp"] = 80 + now / 3 if now < 24 else 45
             nodes = [normalize(host, data, now, 1000 + now) for host in service.HOSTS]
             decision = controller.decide(nodes, now, minimum_level=0,
                 feedback=matched_fan(actual, now, 1000 + now))
@@ -299,7 +299,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vars(self.state["motor_schedule"]), budget)
         self.assertEqual(self.state["settings"], settings)
         release = []
-        for now in range(27, 211, 3):
+        for now in range(27, 451, 3):
             self.mono, self.wall = now, 1000 + now
             self.state.update(fan=matched_fan(10, now, 1000 + now), last_fan=now)
             row = await self.sample()
@@ -308,8 +308,8 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                 break
             self.assertTrue(row["fan"]["confirmed"])
             self.assertEqual(controller._policy["operation"], historical)
-        self.assertEqual([level for _, level in release], [7])
-        self.assertGreaterEqual(release[0][0], 90)
+        self.assertEqual([level for _, level in release], [9])
+        self.assertGreaterEqual(release[0][0], 240)
         self.assertIsNone(controller.operating.workload_epoch)
         self.assertEqual(row["decision"]["execution_trial"]["status"], "pending")
         self.assertFalse(row["fan"]["confirmed"])
@@ -900,7 +900,7 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
     async def test_thermal_permission_expires_in_service_snapshot(self):
         from test_scenarios import fleet, feedback
         c = self.state["controller"]
-        for now, temp in ((94, 68), (97, 69), (100, 70)):
+        for now, temp in ((94, 78), (97, 79), (100, 80)):
             c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
         self.state["force_max"] = True
         self.assertEqual((await self.public())["requested_level"], 16)
@@ -917,8 +917,8 @@ class HighWindWorkerTests(unittest.TestCase):
 
     def test_production_worker_requires_a_fresh_explicit_authority(self):
         from core import HighWindAuthority
-        for authority, expected in ((None, 9), (HighWindAuthority(True, ("host", "cpu"), 94), 9),
-                                    (HighWindAuthority(True, ("host", "cpu"), 99), 9)):
+        for authority, expected in ((None, 9), (HighWindAuthority(True, ("host", "DGX", "cpu"), 94, 80), 9),
+                                    (HighWindAuthority(True, ("host", "DGX", "cpu"), 99, 80), 9)):
             device = FakeFan(["on", "favorite", 7, 1000])
             with patch("service.time.monotonic", return_value=100):
                 result = service.fan_apply(device, lambda: service.FanRequest(16, high_wind=authority),

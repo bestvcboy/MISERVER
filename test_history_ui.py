@@ -50,11 +50,15 @@ class HistoryUITests(unittest.TestCase):
         html = (root / 'ui.html').read_text(encoding='utf-8')
         for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', 'CPU / GPU <b>60°C</b>'):
             self.assertNotIn(retired, html)
-        for policy in ('普通上调每次最多两档', '同一可信传感器当前至少 70°C',
-                       '75°C 硬线', '73°C 预缓冲', '≥10°C 观察 30 秒最多降 3 档',
-                       '8–10°C 最多降 2 档', '5–8°C 无升温时观察 180 秒最多降 1 档',
-                       '每次确认变化后至少观察 60 秒', '不计容量学习'):
+        self.assertNotIn('70°C', html)
+        for policy in ('普通上调每次最多两档', '可信传感器当前实温至少 80°C',
+                       '平台或降温但仍达 80°C', '不足 80°C 仍封顶 10 档',
+                       '75°C 硬线', '73°C 预缓冲', '自动试降每次最多 1 档',
+                       '每次自动试降前至少积累 180 秒合格观察',
+                       '不因恢复档吹凉或时间经过而清除失败档记忆', '不计容量学习'):
             self.assertIn(policy, html)
+        for retired in ('观察 30 秒最多降 3 档', '8–10°C 最多降 2 档', '初次低温观察 30 秒可跳降'):
+            self.assertNotIn(retired, html)
 
     def test_ambient_history_projects_public_fields_and_preserves_raw_monotonic(self):
         with tempfile.TemporaryDirectory() as root:
@@ -110,6 +114,16 @@ context.status = {controller_age_seconds:0, server_time:102, updated_at:102,
 evaluate('render(status)');
 assert.equal(get('policy-detail').textContent, '当前场景：观察 <img src=x onerror="bad()"> & \'回温\'。' + safetyText);
 assert.equal(get('policy-detail').innerHTML, '');
+Object.assign(context.status, {high_wind_gate:true, high_wind_limit:16});
+evaluate('render(status)');
+assert.match(get('policy-detail').textContent, /当前可信实温至少80°C/);
+assert.ok(!get('policy-detail').textContent.includes('70°C'));
+context.status.high_wind_limit = 10;
+evaluate('render(status)');
+assert.match(get('policy-detail').textContent, /请求不超过10档.*实际档位以受限执行和转速读回为准/);
+delete context.status.high_wind_gate;
+delete context.status.high_wind_limit;
+evaluate('render(status)');
 assert.equal(get('policy').textContent, '已保存 · 手动 8 档');
 assert.equal(get('desired').textContent, 16);
 assert.equal(get('actual').textContent, '8 档');
@@ -231,6 +245,8 @@ assert.match(get('learning-state').textContent, /纯规则自动温控.*已暂�
 assert.match(get('learning-published').textContent, /学习阈值不参与控制/);
 assert.doesNotMatch(get('learning-published').textContent, /75 W|当前生效/);
 assert.doesNotMatch(get('learning-candidate').textContent, /50 W|训练/);
+assert.match(get('learning-candidate').textContent, /自动每次只降 1 档.*180 秒.*实际正转速确认/);
+assert.doesNotMatch(get('learning-candidate').textContent, /最多降 [23] 档|3–5°C/);
 assert.match(get('learning-schedule').textContent, /不训练、不评估、不发布/);
 assert.doesNotMatch(get('learning-schedule').textContent, /每 6 小时|下次/);
 assert.match(get('learning-storage').textContent, /原始温度、负载和风力历史继续记录/);

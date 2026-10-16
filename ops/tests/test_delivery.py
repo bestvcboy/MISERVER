@@ -10,6 +10,14 @@ from ops.precommit import verify_staged
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_docker_context_covers_every_inventory_file(self):
+        catalog = json.loads(check.CATALOG.read_text(encoding='utf-8'))
+        rules = (check.ROOT / 'ops/docker/Dockerfile.dockerignore').read_text(encoding='utf-8').splitlines()
+        self.assertEqual(rules[0], '**')
+        allowed = {line[1:] for line in rules if line.startswith('!')}
+        missing = set(catalog['files']) - allowed
+        self.assertFalse(missing, 'Docker context omits required inventory files: ' + ', '.join(sorted(missing)))
+
     def test_missing_suite_or_historical_native_entrypoint_is_refused(self):
         catalog = json.loads(check.CATALOG.read_text(encoding='utf-8'))
         for changes in ({'suites': ['application']},
