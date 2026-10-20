@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 import subprocess
 import tempfile
@@ -80,7 +81,10 @@ class DeliveryTests(unittest.TestCase):
             self.assertNotEqual(check.runtime_report(dict(generated_at=stamp), 100)['ui'], 'responding')
 
     def test_unverified_staged_content_cannot_commit(self):
-        with tempfile.TemporaryDirectory() as folder:
+        local_env = subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines()
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ):
+            for name in local_env:
+                os.environ.pop(name, None)
             root = Path(folder)
             subprocess.run(['git', 'init', '-q', folder], check=True)
             subprocess.run(['git', 'config', 'core.autocrlf', 'false'], cwd=root, check=True)

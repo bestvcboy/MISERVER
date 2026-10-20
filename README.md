@@ -20,6 +20,8 @@ MISERVER 监测四台 DGX Spark / GB10 节点的温度，通过一台外部小�
 | 路径 | 职责 |
 | --- | --- |
 | [core.py](core.py) | 固定规则控制、传感器判断和日志存储。 |
+| [thermal_policy.py](thermal_policy.py) | 统一策略规格、逐来源温度和失败记忆。 |
+| [policy_memory.py](policy_memory.py) | 热记忆可靠保存及精确快照下降门控。 |
 | [service.py](service.py) | 节点轮询、设备执行、电机预算、HTTPS API 和应用生命周期。 |
 | [qr_connector.py](qr_connector.py) | 米家扫码连接与固定设备绑定。 |
 | [ui.html](ui.html)、[ui.js](ui.js)、[ui.css](ui.css) | 控制页面与温度历史界面。 |
@@ -57,6 +59,7 @@ git config core.hooksPath .githooks
 ## 文档和本地数据
 
 - [当前交付工具](ops/README.md) 记录固定规则、Docker 部署约束、检查和运行状态判据。
+- [温控策略矩阵](ops/thermal-policy.md) 记录场景优先级、进入退出、慢回升、稳定负载和重启边界。
 - [历史用户说明](ops/legacy-user-guide.md) 保留旧版详细说明，其中的 v14 学习和 systemd 指令仅供历史查阅。
 - [第三方声明](THIRD_PARTY_NOTICES.md) 记录扫码协议改编来源及相应许可。
 - [协作约束](AGENTS.md) 要求发布失败后保留证据并向前修复，禁止自动恢复旧代码或学习检查点。

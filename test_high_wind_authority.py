@@ -3,7 +3,7 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import service
-from core import Controller, HighWindAuthority, MotionAuthority
+from core import Controller, HighWindAuthority, MotionAuthority, SourceFaultProtection
 from test_core import HOSTS
 from test_scenarios import feedback, fleet
 from test_service import FakeFan
@@ -31,7 +31,7 @@ class MeasuredAuthorityTests(unittest.TestCase):
                     self.assertFalse(replace(authority, **{field: invalid}).valid_at(100))
             with self.subTest(now=invalid):
                 self.assertFalse(authority.valid_at(invalid))
-        self.assertFalse(replace(authority, actual_c=79.999).valid_at(100))
+        self.assertFalse(replace(authority, actual_c=74.999).valid_at(100))
         self.assertFalse(replace(authority, allowed=False).valid_at(100))
 
     def test_witness_requires_host_hostname_and_sensor(self):
@@ -45,7 +45,7 @@ class MeasuredAuthorityTests(unittest.TestCase):
         controller = Controller(HOSTS, high_wind_gate=True)
         valid = HighWindAuthority(True, WITNESS, 100, 80)
         for authority in (HighWindAuthority(True, WITNESS, 100),
-                          replace(valid, actual_c=79.999), replace(valid, actual_c=float("inf")),
+                          replace(valid, actual_c=74.999), replace(valid, actual_c=float("inf")),
                           replace(valid, observed_mono=True), replace(valid, witness=None),
                           replace(valid, observed_mono=94), replace(valid, observed_mono=101)):
             with self.subTest(authority=authority):
@@ -86,7 +86,9 @@ class SourceTrustTests(unittest.TestCase):
                             sensor["calibrated"] = False
                 decision = self.decide(controller, nodes, 103)
                 self.assertEqual(decision["high_wind_limit"], 10)
-                self.assertFalse(controller.high_wind.allowed)
+                self.assertIsInstance(controller.high_wind.proof, SourceFaultProtection)
+                self.assertIsNone(controller.high_wind.actual_c)
+                self.assertEqual(controller.high_wind.normal_ceiling_at(103), 10)
 
     def test_untrusted_host_or_missing_witness_identity_never_authorizes(self):
         for rejection in ("unknown_host", "duplicate_host", "hostname", "sensor_id"):
@@ -134,8 +136,9 @@ class SourceTrustTests(unittest.TestCase):
         for node in nodes:
             node["source_ts"] = 97
         self.assertEqual(self.decide(controller, nodes, 100)["high_wind_limit"], 16)
-        self.assertEqual(controller.effective_limit(102.999), 16)
-        self.assertEqual(controller.effective_limit(103), 10)
+        self.assertEqual(controller.high_wind.observed_mono, 96.5)
+        self.assertEqual(controller.effective_limit(102.499999), 16)
+        self.assertEqual(controller.effective_limit(102.5), 10)
 
 
 class WriteTimeAuthorityTests(unittest.TestCase):
@@ -150,7 +153,7 @@ class WriteTimeAuthorityTests(unittest.TestCase):
             def reserve(*args):
                 reservations.append(args[1])
                 if len(reservations) == 1:
-                    controller.decide(fleet(103, cpu=79), 103, feedback=feedback(103, 2))
+                    controller.decide(fleet(103, cpu=74), 103, feedback=feedback(103, 2))
                 elif later_hot:
                     controller.decide(fleet(104, cpu=80), 104, feedback=feedback(104, 2))
                 return persist(*args)
@@ -158,7 +161,8 @@ class WriteTimeAuthorityTests(unittest.TestCase):
                     patch.object(schedule, "persist_debt_then_set_budget", side_effect=reserve):
                 service.fan_apply(device, lambda: service.FanRequest(16, protected=True,
                     high_wind=controller.high_wind, motion=MotionAuthority(104, WITNESS, 80, 75)), schedule)
-            self.assertEqual(reservations[:2], [16, 10])
+            self.assertEqual(reservations[0], 10)
+            self.assertTrue(all(level is None or level <= 10 for level in reservations))
             self.assertEqual(device.writes, [10])
 
     def test_exact_expiry_during_reservation_clamps_before_write(self):

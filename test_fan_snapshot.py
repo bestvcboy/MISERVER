@@ -11,7 +11,7 @@ from unittest.mock import patch
 import service
 from core import Controller, normalize
 from learning import Learning, context_of
-from test_service import FakeFan, publish_test_request
+from test_service import FakeFan, publish_test_request, with_motor_feedback
 
 
 def matched_fan(level=16, mono=99, wall=999):
@@ -206,12 +206,16 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
 
     async def open_app(self, *, learning_enabled=False, high_wind_gate=False):
         if hasattr(self, "state"):
+            if self.state["thermal_memory"] is not None:
+                await self.state["thermal_memory"].flush(self.state["controller"])
             await self.state["qr"].close()
             self.state["disk"].shutdown(wait=True)
             self.state["history_disk"].shutdown(wait=True)
         with patch("service.MotorSchedule.load", return_value=service.MotorSchedule()):
             self.app = await service.create_app(self.root, learning_enabled=learning_enabled, high_wind_gate=high_wind_gate)
         self.state = self.app[service.STATE]
+        if self.state["thermal_memory"] is not None:
+            await self.state["thermal_memory"].flush(self.state["controller"])
         self.state["settings"]["manual_level"] = None
         self.state["fan"] = matched_fan()
         self.state["last_fan"] = self.state["last_poll"] = self.mono
@@ -225,6 +229,8 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
                           if route.resource.canonical == "/api/status")
 
     async def asyncTearDown(self):
+        if self.state["thermal_memory"] is not None:
+            await self.state["thermal_memory"].flush(self.state["controller"])
         await self.state["qr"].close()
         self.state["disk"].shutdown(wait=True)
         self.state["history_disk"].shutdown(wait=True)
@@ -266,24 +272,33 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projected, dict(physical, confirmed=False, execution="pending"))
         self.assertEqual(self.state["fan"], physical)
 
-    async def test_completed_high_wind_cap_confirms_current_fan_and_releases_idle_epoch(self):
+    async def test_completed_high_wind_hold_and_later_physical_ten_release_idle_epoch(self):
         await self.open_app(high_wind_gate=True)
         controller = self.state["controller"]
         actual = 10
-        for now in range(0, 25, 3):
+        increases = []
+        for now in range(0, 100, 3):
             data = telemetry(1000 + now)
-            data["cpu_percent"] = 35 if now < 24 else 0
-            data["temperatures"]["acpi"][0]["temp"] = 80 + now / 3 if now < 24 else 45
+            data["cpu_percent"] = 35
+            data["temperatures"]["acpi"][0]["temp"] = min(90, 80 + now / 3)
             nodes = [normalize(host, data, now, 1000 + now) for host in service.HOSTS]
             decision = controller.decide(nodes, now, minimum_level=0,
                 feedback=matched_fan(actual, now, 1000 + now))
+            if decision["level"] > actual:
+                self.assertEqual(decision["level"], actual + 1)
+                increases.append(now)
             actual = decision["level"]
+            if actual == 16 and decision["execution_trial"]["status"] == "confirmed":
+                break
         self.assertEqual((actual, decision["execution_trial"]["to"],
-                          decision["execution_trial"]["status"]), (10, 16, "confirmed"))
+                          decision["execution_trial"]["status"]), (16, 16, "confirmed"))
+        self.assertEqual(len(increases), 6)
+        self.assertTrue(all(b - a >= 10 for a, b in zip(increases, increases[1:])))
         historical = deepcopy(controller._policy["operation"])
-        self.mono, self.wall = 27, 1027
+        physical_ten_at = now + 3
+        self.mono, self.wall = physical_ten_at, 1000 + physical_ten_at
         self.state.update(decision=decision, fan_request=service.FanRequest(10),
-            fan=matched_fan(10, 27, 1027), last_fan=27, last_poll=27, nodes=nodes)
+            fan=matched_fan(10, self.mono, self.wall), last_fan=self.mono, last_poll=self.mono, nodes=nodes)
         public = await self.public()
         self.assertEqual((public["requested_level"], public["fan"]["level"],
                           public["fan"]["execution"], public["fan"]["confirmed"]),
@@ -299,17 +314,24 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(vars(self.state["motor_schedule"]), budget)
         self.assertEqual(self.state["settings"], settings)
         release = []
-        for now in range(27, 451, 3):
+        for now in range(physical_ten_at, physical_ten_at + 424, 3):
             self.mono, self.wall = now, 1000 + now
             self.state.update(fan=matched_fan(10, now, 1000 + now), last_fan=now)
             row = await self.sample()
-            if row["requested_level"] < 10:
-                release.append((now, row["requested_level"]))
+            if row["decision"]["level"] < 10:
+                self.assertEqual(row["requested_level"], 10)
+                self.assertFalse(row["decision"]["thermal_memory"]["descent_allowed"])
+                await self.state["thermal_memory"].flush(controller)
+                committed = await self.public()
+                self.assertEqual(committed["requested_level"], 9)
+                self.assertFalse(committed["fan"]["confirmed"])
+                release.append((now, committed["requested_level"]))
                 break
+            await self.state["thermal_memory"].flush(controller)
             self.assertTrue(row["fan"]["confirmed"])
             self.assertEqual(controller._policy["operation"], historical)
         self.assertEqual([level for _, level in release], [9])
-        self.assertGreaterEqual(release[0][0], 240)
+        self.assertGreaterEqual(release[0][0] - physical_ten_at, 240 - 27)
         self.assertIsNone(controller.operating.workload_epoch)
         self.assertEqual(row["decision"]["execution_trial"]["status"], "pending")
         self.assertFalse(row["fan"]["confirmed"])
@@ -465,7 +487,8 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         physical = deepcopy(self.state["fan"])
         with patch.object(self.state["controller"], "decide", wraps=self.state["controller"].decide) as decide:
             row = await self.sample()
-        self.assertEqual(decide.call_args.kwargs["feedback"], dict(physical, confirmed=False, execution="pending"))
+        self.assertEqual(decide.call_args.kwargs["feedback"],
+            with_motor_feedback(dict(physical, confirmed=False, execution="pending"), self.state))
         self.assertIsNot(decide.call_args.kwargs["feedback"], self.state["fan"])
         self.assertEqual(self.state["fan"], physical)
         for fault in (None, "unknown", True):
@@ -490,7 +513,7 @@ class CurrentRequestTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.state["controller"], "decide", side_effect=new_intent) as decide:
             row = await self.sample()
         self.assertEqual(decide.call_args.kwargs["power_thresholds"], policy)
-        self.assertEqual(decide.call_args.kwargs["feedback"], physical)
+        self.assertEqual(decide.call_args.kwargs["feedback"], with_motor_feedback(physical, self.state))
         self.assertEqual(row["requested_level"], 15)
         self.assertEqual(row["active_power_policy"], {})
         self.assert_evidence(row["fan"], physical)
@@ -788,6 +811,7 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
         with patch("service.MotorSchedule.load", return_value=service.MotorSchedule()):
             self.app = await service.create_app(Path(self.temp.name))
         self.state = self.app[service.STATE]
+        await self.state["thermal_memory"].flush(self.state["controller"])
         self.status = next(route.handler for route in self.app.router.routes()
                            if route.resource.canonical == "/api/status")
         self.state.update(last_poll=100, last_fan=100, fan=matched_fan(10, 100, 1000))
@@ -797,6 +821,7 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
             (cell.cell_contents for cell in startup.__closure__)))["fan"]
 
     async def asyncTearDown(self):
+        await self.state["thermal_memory"].flush(self.state["controller"])
         await self.state["qr"].close()
         self.state["disk"].shutdown(wait=True)
         self.state["history_disk"].shutdown(wait=True)
@@ -826,12 +851,12 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
         self.state["motor_schedule"].fault = True
         self.assertEqual((await self.public())["requested_level"], 10)
 
-    async def test_current_sixteen_corrects_directly_to_ten_with_actual_readback(self):
+    async def test_unqualified_current_sixteen_holds_with_actual_readback(self):
         device = FakeFan(["on", "favorite", 16, 2080])
         self.state.update(device=device, last_identity=self.mono, fan=matched_fan(16, 100, 1000))
         await self.once()
         result = await self.public()
-        self.assertEqual((result["requested_level"], result["fan"]["level"], device.writes), (10, 10, [10]))
+        self.assertEqual((result["requested_level"], result["fan"]["level"], device.writes), (10, 16, []))
         self.assertEqual(result["fan"]["attempts"], 0)
 
     async def test_unknown_read_is_not_a_budget_reset_or_a_blind_correction(self):
@@ -860,6 +885,19 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((schedule.attempts, schedule.expected_level), (0, None))
         self.assertEqual(device.writes, [])
 
+    async def test_late_stage_recovery_does_not_publish_current_ten_as_confirmed(self):
+        device = FakeFan(["on", "favorite", 5, 1099])
+        schedule = self.state["motor_schedule"]
+        schedule.attempts, schedule.expected_level, schedule.fault = 2, 5, True
+        schedule.last_attempt = schedule.last_increase = 95
+        self.state.update(device=device, last_identity=self.mono)
+        await self.once()
+        result = await self.public()
+        self.assertEqual((result["requested_level"], result["fan"]["level"], device.writes), (10, 5, []))
+        self.assertEqual((result["fan"]["execution"], result["fan"]["confirmed"],
+                          result["fan"]["fault"], result["fan"]["attempts"]), ("pending", False, False, 0))
+        self.assertTrue(result["fan"]["protection_interrupted"])
+
     async def test_recovery_lease_is_bound_to_the_original_episode_during_budget_persist(self):
         fan_vars = dict(zip(self.fan_loop.__code__.co_freevars,
             (cell.cell_contents for cell in self.fan_loop.__closure__)))
@@ -880,6 +918,10 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
             episode.published = service.ReadbackAssessment(5, 97, 1)
             schedule.attempts, schedule.expected_level, schedule.fault = 0, None, False
             schedule.last_attempt = schedule.last_increase = 0
+            self.assertEqual(apply_vars["request_snapshot"]().snapshot.blocker,
+                             "current_memory_not_acknowledged")
+            await self.state["thermal_memory"].flush(c)
+            self.assertIsNone(apply_vars["request_snapshot"]().snapshot.blocker)
             snapshots = []
             def persist(attempts, expected, fault=False):
                 result = original_persist(attempts, expected, fault)
@@ -892,24 +934,76 @@ class ProductionCapTests(unittest.IsolatedAsyncioTestCase):
             device = FakeFan(["on", "favorite", 2, 1000])
             with patch.object(schedule, "persist_debt_then_set_budget", side_effect=persist):
                 result = await apply(device)
-            self.assertEqual(device.writes, [4])
+            self.assertEqual(device.writes, [])
             self.assertEqual(snapshots[0], 10)
             self.assertIsNone(episode.active_recovery)
-            self.assertEqual(result["level"], 4)
+            self.assertEqual(result["level"], 2)
+            self.assertEqual(schedule.attempts, 1)
 
     async def test_thermal_permission_expires_in_service_snapshot(self):
         from test_scenarios import fleet, feedback
         c = self.state["controller"]
         for now, temp in ((94, 78), (97, 79), (100, 80)):
             c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
+        self.state["fan_request"] = service.FanRequest(c.level, high_wind=c.high_wind, motion=c.motion)
         self.state["force_max"] = True
         self.assertEqual((await self.public())["requested_level"], 16)
         self.mono, self.wall = 106.001, 1006.001
         self.state["last_poll"] = self.mono
         self.assertEqual((await self.public())["requested_level"], 10)
 
+    async def test_new_authority_cannot_be_paired_with_an_old_base_request(self):
+        from test_scenarios import fleet, feedback
+        c = self.state["controller"]
+        self.state["fan_request"] = service.FanRequest(16)
+        decision = c.decide(fleet(100, cpu=80), 100, minimum_level=0, feedback=feedback(100, 10))
+        self.assertEqual((decision['level'], decision['normal_ceiling']), (11, 16))
+        self.assertEqual((await self.public())["requested_level"], 10)
+        self.state["fan_request"] = service.FanRequest(c.level, high_wind=c.high_wind, motion=c.motion)
+        self.assertEqual((await self.public())["requested_level"], 11)
+        await self.state["thermal_memory"].flush(c)
+        device = FakeFan(["on", "favorite", 10, 1500])
+        self.state.update(device=device, last_identity=self.mono)
+        await self.once()
+        self.assertEqual(device.writes, [11])
+        self.mono, self.wall = 106, 1006
+        self.state['last_poll'] = self.mono
+        self.assertEqual((await self.public())["requested_level"], 10)
+
+    async def test_async_protection_preserves_independent_current_critical_permission(self):
+        from test_scenarios import fleet, feedback
+        controller = self.state["controller"]
+        controller.decide(fleet(100, cpu=80), 100, minimum_level=0, feedback=feedback(100, 10))
+        self.state["fan_request"] = service.FanRequest(controller.level,
+            high_wind=controller.high_wind, motion=controller.motion)
+        protect = dict(zip(self.fan_loop.__code__.co_freevars,
+            (cell.cell_contents for cell in self.fan_loop.__closure__)))["protect"]
+        self.state["settings_error"] = "unrelated settings persistence fault"
+        protect()
+        self.assertEqual(self.state["fan_request"].high_wind, controller.high_wind)
+        self.assertEqual(self.state["fan_request"].motion, controller.motion)
+        self.assertEqual((await self.public())["requested_level"], 16)
+        device = FakeFan(["on", "favorite", 10, 1500])
+        self.state.update(device=device, last_identity=self.mono)
+        await self.once()
+        self.assertEqual(device.writes, [])
+        self.mono, self.wall = 106, 1006
+        self.assertEqual((await self.public())["requested_level"], 10)
+
 
 class HighWindWorkerTests(unittest.TestCase):
+    def test_late_stage_recovery_does_not_grant_high_wind_authority(self):
+        for actual, expected_writes, confirmed in ((9, [10], True), (11, [], False)):
+            with self.subTest(actual=actual):
+                device = FakeFan(["on", "favorite", actual, 1500])
+                schedule = service.MotorSchedule(attempts=2, expected_level=actual, fault=True)
+                with patch("service.time.monotonic", return_value=100):
+                    result = service.fan_apply(device, lambda: service.FanRequest(16), schedule)
+                self.assertEqual((device.writes, result["confirmed"], result["fault"], result["attempts"]),
+                                 (expected_writes, confirmed, False, 0))
+                self.assertEqual(result["level"], 10 if actual == 9 else 11)
+                self.assertTrue(result["protection_interrupted"])
+
     def test_default_worker_caps_an_unauthorized_sixteen_request(self):
         device = FakeFan(["on", "favorite", 10, 1500])
         result = service.fan_apply(device, lambda: service.FanRequest(16), service.MotorSchedule())

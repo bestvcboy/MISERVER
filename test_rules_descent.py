@@ -592,10 +592,12 @@ class HighWindAuthorityTests(unittest.TestCase):
         for now, temp in ((0, 68), (3, 69), (6, 80)):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             levels.append(d["level"])
-        self.assertEqual(levels, [10, 10, 16])
-        self.assertEqual(d["demand"], 16)
+        self.assertEqual(levels, [10, 10, 11])
+        self.assertEqual(d["demand"], 11)
         self.assertEqual(d["high_wind_limit"], 16)
-        self.assertEqual(c.effective_limit(11.999), 16)
+        self.assertEqual(c.effective_limit(11.499), 16)
+        self.assertEqual(c.effective_limit(11.5), 10)
+        self.assertEqual(c.effective_limit(11.999), 10)
         self.assertEqual(c.effective_limit(12), 10)
         self.assertEqual(c.effective_limit(12.001), 10)
 
@@ -613,8 +615,8 @@ class HighWindAuthorityTests(unittest.TestCase):
             nodes = fleet(now, cpu=temp)
             nodes[1].update(online=False, failure_kind="transport", cpu_temp=None, gpu_temp=None, board_temp=None, sensors=[])
             d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-        self.assertEqual(d["level"], 16)
-        self.assertEqual(d["demand"], 16)
+        self.assertEqual(d["level"], 11)
+        self.assertEqual(d["demand"], 11)
         self.assertTrue(c.high_wind.allowed)
 
     def test_capped_startup_can_finish_on_ten(self):
@@ -638,10 +640,15 @@ class HighWindAuthorityTests(unittest.TestCase):
                 if changed == "ambiguous" and now == 6:
                     hot["ambiguous_sensors"] = True
                 d = c.decide(nodes, now, minimum_level=0, feedback=feedback(now, 10))
-            self.assertEqual(d["level"], 16 if changed == "identity" else 10)
-            self.assertEqual(c.high_wind.allowed, changed == "identity")
+            self.assertEqual(d["level"], 11 if changed == "identity" else 12)
+            self.assertTrue(c.high_wind.allowed)
             if changed == "identity":
                 self.assertEqual(c.high_wind.witness[:2], (HOSTS[0], "replaced-device"))
+                self.assertIsNone(d['high_wind']['exception'])
+            else:
+                self.assertEqual(d['high_wind']['exception'], 'SourceFaultProtection')
+                self.assertIsNone(d['high_wind']['actual_c'])
+                self.assertEqual(d['normal_ceiling'], 10)
 
     def test_unrelated_service_protection_does_not_erase_hot_source_evidence(self):
         c = Controller(HOSTS, rules_only=True, high_wind_gate=True)
@@ -649,7 +656,7 @@ class HighWindAuthorityTests(unittest.TestCase):
             d = c.decide(fleet(now, cpu=temp), now, minimum_level=0, feedback=feedback(now, 10))
             if now < 6:
                 c.protect("unrelated communication interruption", now)
-        self.assertEqual(d["level"], 16)
+        self.assertEqual(d["level"], 11)
         self.assertTrue(c.high_wind.allowed)
         self.assertEqual(c.effective_limit(6), 16)
 

@@ -8,6 +8,8 @@ import time
 import tempfile
 import unittest
 from copy import deepcopy
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -18,12 +20,20 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from service import (DEVICE_ID, DEVICE_IP, DEVICE_MAC, DEVICE_MODEL, MOTOR_IDENTITY, STATE,
                      FanRequest, MotorSchedule, atomic_write, create_app, device_from_token,
-                     fan_apply, settings_checked, trusted_peer, drain_owned, settings_from_disk)
+                     fan_apply, settings_checked, trusted_peer, drain_owned, settings_from_disk,
+                     ActuationSnapshot, AdmissionBoundary)
 from qr_connector import QRConnector, Phase, TARGET, START_CONSENT, BIND_CONSENT
 from test_qr_connector import FakeCloud, OWNER
 
 def publish_test_request(state):
     state["fan_request"] = FanRequest(state["decision"]["level"])
+
+
+def with_motor_feedback(observed, state):
+    schedule = state['motor_schedule']
+    return dict(observed, motor_attempts=schedule.attempts,
+        motor_fault=schedule.fault or bool(schedule.persistence_error),
+        next_motor_at=max(schedule.last_attempt + 8, schedule.last_decrease + 30))
 
 
 class SettingsSchemaTests(unittest.TestCase):
@@ -114,6 +124,112 @@ class FanTests(unittest.TestCase):
         self.timer = patch("service.time.monotonic", self.clock)
         self.timer.start()
         self.addCleanup(self.timer.stop)
+
+    def blocked_request(self, blocker="storage_protect", level=10):
+        return FanRequest(level, snapshot=ActuationSnapshot(
+            generation=1, settings_revision=1, operation=None, operation_status=None,
+            original_deadline=None, proof=None, normal_ceiling=10, effective_target=level,
+            next_command=level, transition_target=None, endpoint=("on", "favorite", 8, 1200, 100),
+            memory_digest=None, acknowledged_digest=None, memory_revision=0,
+            storage_state="protect" if blocker == "storage_protect" else "healthy",
+            budget_identity=tuple(sorted(MOTOR_IDENTITY.items())), blocker=blocker))
+
+    def test_known_blocker_repeated_calls_preserve_budget_and_last_attempt(self):
+        for blocker in ("storage_protect", "settings_revision_pending", "pairing",
+                        "memory_conflict", "memory_failed", "current_memory_not_acknowledged"):
+            for attempts in (0, 1):
+                for actual in (["on", "favorite", 8, 1200], ["on", "auto", 16, 346]):
+                    with self.subTest(blocker=blocker, attempts=attempts, mode=actual[1]), \
+                            tempfile.TemporaryDirectory() as directory:
+                        schedule = MotorSchedule(last_attempt=70, last_decrease=60,
+                            last_increase=50, budget_path=Path(directory) / "budget.json")
+                        self.assertTrue(schedule.persist_debt_then_set_budget(
+                            attempts, 16 if attempts else None))
+                        debt = schedule.budget_path.read_bytes()
+                        before = vars(schedule).copy()
+                        fan = FakeFan(actual.copy())
+                        request = self.blocked_request(blocker)
+                        with patch.object(schedule, "persist_debt_then_set_budget",
+                                          wraps=schedule.persist_debt_then_set_budget) as persist, \
+                                patch.object(fan, "on") as power, \
+                                patch.object(fan, "set_mode") as mode, \
+                                patch.object(fan, "set_favorite_level") as level:
+                            for now in (100, 109, 118):
+                                self.clock.now = now
+                                result = fan_apply(fan, lambda: request, schedule, high_wind_gate=False)
+                                self.assertEqual({key: getattr(schedule, key) for key in before}, before)
+                                self.assertEqual(schedule.budget_path.read_bytes(), debt)
+                                self.assertEqual((result["error"], result["confirmed"]), (blocker, False))
+                            persist.assert_not_called()
+                            power.assert_not_called()
+                            mode.assert_not_called()
+                            level.assert_not_called()
+                        self.assertEqual(fan.writes, [])
+
+    def test_known_blocker_never_unlocks_existing_fault_on_auto_register_match(self):
+        for requested in (10, 16):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory() as directory:
+                schedule = MotorSchedule(last_attempt=70, budget_path=Path(directory) / "budget.json")
+                self.assertTrue(schedule.persist_debt_then_set_budget(2, 16, True))
+                debt, before = schedule.budget_path.read_bytes(), vars(schedule).copy()
+                fan = FakeFan(["on", "auto", 16, 346])
+                request = self.blocked_request(level=requested)
+                with patch.object(schedule, "persist_debt_then_set_budget") as persist:
+                    for now in (100, 109, 118):
+                        self.clock.now = now
+                        result = fan_apply(fan, lambda: request, schedule, high_wind_gate=False)
+                        self.assertEqual((result["execution"], result["fault"], result["confirmed"]),
+                                         ("fault", True, False))
+                        self.assertEqual({key: getattr(schedule, key) for key in before}, before)
+                        self.assertEqual(schedule.budget_path.read_bytes(), debt)
+                    persist.assert_not_called()
+                self.assertEqual(fan.writes, [])
+
+    def test_blocker_appearing_at_final_guard_still_spends_reservation(self):
+        for attempts in (0, 1):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as directory:
+                self.clock.now = 100
+                schedule = MotorSchedule(last_attempt=70, budget_path=Path(directory) / "budget.json")
+                self.assertTrue(schedule.persist_debt_then_set_budget(attempts, 16 if attempts else None))
+                request = self.blocked_request(None)
+                blocked = [False]
+                def wanted(**kwargs):
+                    return replace(request, snapshot=replace(request.snapshot, blocker="storage_protect")) \
+                        if blocked[0] else request
+                class FinalGuardBlocker(AdmissionBoundary):
+                    def submit_guarded(self, *args, **kwargs):
+                        blocked[0] = True
+                        return super().submit_guarded(*args, **kwargs)
+                admission = FinalGuardBlocker()
+                fan = FakeFan(["on", "favorite", 8, 1200])
+                with patch.object(fan, "set_favorite_level") as level:
+                    result = fan_apply(fan, wanted, schedule, high_wind_gate=False, admission=admission)
+                    level.assert_not_called()
+                self.assertTrue(blocked[0])
+                self.assertEqual(result["submission"]["state"], "Refused")
+                self.assertEqual(result["error"], "actuation_snapshot_changed")
+                self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault,
+                                  schedule.last_attempt), (attempts + 1, 10, attempts == 1, 100))
+                record = json.loads(schedule.budget_path.read_text())
+                self.assertEqual((record["attempts"], record["expected_level"], record["fault"]),
+                                 (attempts + 1, 10, attempts == 1))
+                self.assertEqual((fan.writes, list(admission.dispatches)), ([], []))
+
+    def test_known_blocker_preserves_matched_readback_recovery_and_durable_debt(self):
+        for requested in (5, 10):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory() as directory:
+                schedule = MotorSchedule(last_attempt=70, budget_path=Path(directory) / "budget.json")
+                self.assertTrue(schedule.persist_debt_then_set_budget(2, 5, True))
+                debt = schedule.budget_path.read_bytes()
+                fan = FakeFan(["on", "favorite", 5, 1099])
+                request = self.blocked_request(level=requested)
+                result = fan_apply(fan, lambda: request, schedule, high_wind_gate=False)
+                self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (0, None, False))
+                self.assertEqual((schedule.last_attempt, fan.writes), (70, []))
+                self.assertEqual(schedule.budget_path.read_bytes(), debt)
+                self.assertEqual(result["confirmed"], requested == 5)
+                if requested != 5:
+                    self.assertEqual(result["error"], "storage_protect")
 
     def test_optional_ambient_is_independent_of_motor_validity(self):
         fields = ("ambient_c", "ambient_source", "ambient_observed_mono", "ambient_verified_at")
@@ -388,6 +504,100 @@ class FanTests(unittest.TestCase):
         self.clock.now += 100
         fan_apply(fan, lambda: 16, self.schedule, high_wind_gate=False)
         self.assertEqual(fan.writes, [16, 16])
+
+    def test_late_expected_stage_readback_recovers_exhausted_budget(self):
+        fan = FakeFan(["on", "favorite", 5, 1099])
+        self.schedule = MotorSchedule(last_attempt=95, last_increase=95,
+                                      attempts=2, expected_level=5, fault=True)
+        result = fan_apply(fan, lambda: FanRequest(10), self.schedule)
+        self.assertEqual((result["execution"], result["fault"], result["attempts"],
+                          result["confirmed"], result["level"], fan.writes),
+                         ("pending", False, 0, False, 5, []))
+        self.assertTrue(result["protection_interrupted"])
+        self.assertIsNone(self.schedule.expected_level)
+        for now, writes in ((103, []), (105, [7]), (114.99, [7]),
+                            (115, [7, 9]), (125, [7, 9, 10])):
+            with self.subTest(now=now):
+                self.clock.now = now
+                result = fan_apply(fan, lambda: FanRequest(10), self.schedule)
+                self.assertEqual(fan.writes, writes)
+                self.assertEqual(result["confirmed"], now == 125)
+                self.assertEqual(result["execution"], "matched" if now == 125 else "pending")
+                self.assertEqual((result["attempts"], result["fault"]), (0, False))
+
+    def test_late_stage_recovery_does_not_allow_more_than_two_unconfirmed_writes(self):
+        fan = FakeFan(["on", "favorite", 5, 1099])
+        fan.ignore_writes = True
+        schedule = MotorSchedule(last_attempt=95, last_increase=95,
+                                 attempts=2, expected_level=5, fault=True)
+        for now, writes, attempts in ((100, [], 0), (105, [7], 1), (113, [7], 1),
+                                      (115, [7, 7], 2), (200, [7, 7], 2)):
+            with self.subTest(now=now):
+                self.clock.now = now
+                result = fan_apply(fan, lambda: FanRequest(10), schedule)
+                self.assertEqual((fan.writes, result["attempts"], result["fault"]),
+                                 (writes, attempts, attempts == 2))
+                self.assertFalse(result["confirmed"])
+
+    def test_late_expected_stage_requires_positive_running_matching_readback(self):
+        for actual in (["off", "favorite", 5, 1099], ["on", "auto", 5, 1099],
+                       ["on", "favorite", 5, 0], ["on", "favorite", 4, 1099],
+                       ["on", "favorite", 6, 1099], ["on", "favorite", 5, float("nan")], None):
+            with self.subTest(actual=actual):
+                fan = FakeFan(actual)
+                fan.fail = actual is None
+                schedule = MotorSchedule(attempts=2, expected_level=5, fault=True)
+                result = fan_apply(fan, lambda: FanRequest(10), schedule)
+                self.assertEqual((result["execution"], result["confirmed"], fan.writes),
+                                 ("fault", False, []))
+                self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (2, 5, True))
+
+    def test_late_expected_stage_cannot_clear_untrusted_persistence(self):
+        for attempts in (1, 2):
+            with self.subTest(attempts=attempts):
+                fan = FakeFan(["on", "favorite", 5, 1099])
+                schedule = MotorSchedule(attempts=attempts, expected_level=5, fault=True,
+                                         persistence_error="untrusted budget")
+                with patch.object(schedule, "persist_debt_then_set_budget") as persist:
+                    result = fan_apply(fan, lambda: FanRequest(10), schedule)
+                persist.assert_not_called()
+                self.assertEqual((result["execution"], result["confirmed"], result["error"], fan.writes),
+                                 ("fault", False, "untrusted budget", []))
+                self.assertIsNone(result["verified_at"])
+                self.assertIsNone(result["observed_mono"])
+                self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault),
+                                 (attempts, 5, True))
+
+    def test_late_expected_stage_recovery_stays_after_read_only_guards(self):
+        for request, read_only in ((FanRequest(10, read_only_floor=5), None),
+                                   (FanRequest(10, read_only_floor=4), None),
+                                   (FanRequest(10), lambda: 5)):
+            with self.subTest(request=request, read_only=read_only):
+                schedule = MotorSchedule(attempts=2, expected_level=5, fault=True)
+                fan = FakeFan(["on", "favorite", 5, 1099])
+                result = fan_apply(fan, lambda: request, schedule, read_only=read_only)
+                self.assertEqual((result["confirmed"], result["fault"], fan.writes), (False, True, []))
+                self.assertTrue(result["protection_interrupted"])
+                self.assertEqual((schedule.attempts, schedule.expected_level), (2, 5))
+
+    def test_late_expected_stage_recovery_requires_reliable_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for failing_call in ("service.atomic_write", "service.fsync_directory"):
+                with self.subTest(failing_call=failing_call):
+                    fan = FakeFan(["on", "favorite", 5, 1099])
+                    schedule = MotorSchedule(attempts=2, expected_level=5, fault=True,
+                                             budget_path=Path(directory) / "budget.json")
+                    with patch(failing_call, side_effect=OSError("private storage detail")):
+                        result = fan_apply(fan, lambda: FanRequest(10), schedule)
+                    self.assertEqual((result["execution"], result["confirmed"], fan.writes), ("fault", False, []))
+                    self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (2, 5, True))
+                    self.assertTrue(schedule.persistence_error)
+                    self.assertIsNone(result["verified_at"])
+                    self.assertIsNone(result["observed_mono"])
+                    self.assertNotIn("private storage detail", result["error"])
+                    with patch.object(schedule, "persist_debt_then_set_budget") as persist:
+                        self.assertTrue(fan_apply(fan, lambda: FanRequest(10), schedule)["fault"])
+                    persist.assert_not_called()
 
     def test_missing_or_malformed_readback_never_writes(self):
         fan = FakeFan()
@@ -680,6 +890,30 @@ class MotorDurabilityTests(unittest.TestCase):
         self.assertEqual((record["attempts"], record["expected_level"], record["fault"]), (1, 15, False))
         self.assertEqual(self.load().attempts, 1)
 
+        with self.subTest(recovery="late expected stage"):
+            self.assertTrue(schedule.persist_debt_then_set_budget(2, 5, True))
+            restored = self.load()
+            fan = FakeFan(["on", "favorite", 5, 1099])
+            debt = self.path.read_bytes()
+            result = fan_apply(fan, lambda: FanRequest(10), restored)
+            self.assertEqual((result["confirmed"], result["fault"], restored.attempts, fan.writes),
+                             (False, False, 0, []))
+            self.assertEqual(self.path.read_bytes(), debt)
+            restored = self.load()
+            self.assertEqual((restored.attempts, restored.expected_level, restored.fault), (2, 5, True))
+            fan.actual[2] = 4
+            self.clock.now += 30
+            self.assertEqual(fan_apply(fan, lambda: FanRequest(10), restored)["execution"], "fault")
+            self.assertEqual((fan.writes, self.path.read_bytes()), ([], debt))
+            fan.actual[2] = 5
+            fan.ignore_writes = True
+            result = fan_apply(fan, lambda: FanRequest(10), restored)
+            self.assertEqual((result["confirmed"], result["fault"], fan.writes), (False, False, [7]))
+            record = json.loads(self.path.read_text())
+            self.assertEqual((record["attempts"], record["expected_level"], record["fault"]), (1, 7, False))
+            restored = self.load()
+            self.assertEqual((restored.attempts, restored.expected_level, restored.fault), (1, 7, False))
+
     def test_recovery_preserves_one_attempt_and_unknown_expected_debt(self):
         for attempts, expected, fault in ((1, 15, False), (2, None, False)):
             with self.subTest(attempts=attempts):
@@ -885,7 +1119,7 @@ vm.runInNewContext(fs.readFileSync('ui.js', 'utf8'), context);
   vm.runInNewContext('render(statusSnapshot)', context);
   assert.equal(get('control-mode').value, '2');
   assert.match(get('settings-result').textContent, /新草稿仍未保存/);
-  assert.match(get('policy').textContent, /手动 5 档/);
+  assert.match(get('policy').textContent, /手动最低档 5 档/);
   get('settings-cancel').events.click();
   assert.equal(get('control-mode').value, '5');
   assert.equal(get('control-mode').children.length, 18);
@@ -933,7 +1167,7 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                     await tasks_release.wait()
                     tasks_drained.set()
 
-                def final_fan(device, target, schedule, *, read_only=None, high_wind_gate=True):
+                def final_fan(device, target, schedule, *, read_only=None, high_wind_gate=True, admission=None):
                     self.assertTrue(tasks_drained.is_set())
                     self.assertTrue(state["fan_lock"].locked())
                     self.assertIs(device, state["device"])
@@ -952,8 +1186,10 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(entered.wait(), 1)
                         owner = state["settings_task"]
                         stopping = asyncio.create_task(app.on_cleanup[-1](app))
-                        await asyncio.sleep(0)
-                        await asyncio.sleep(0)
+                        for _ in range(100):
+                            if state['stop']:
+                                break
+                            await asyncio.sleep(.001)
                         self.assertTrue(state["stop"])
                         self.assertTrue(state["force_max"])
                         self.assertFalse(stopping.done())
@@ -968,7 +1204,10 @@ class ShutdownTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIsNone(state["settings_task"])
                         self.assertTrue(running_task.done())
                         self.assertTrue(tasks_drained.is_set())
-                        self.assertEqual(final_attempts, [FanRequest(16, protected=True)])
+                        self.assertEqual(len(final_attempts), 1)
+                        self.assertEqual(final_attempts[0].level, 16)
+                        self.assertTrue(final_attempts[0].protected)
+                        self.assertEqual(final_attempts[0].snapshot.next_command, 16)
                         for key in ("disk",):
                             with self.assertRaises(RuntimeError):
                                 state[key].submit(lambda: None)
@@ -1172,7 +1411,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                     await monitor()
                 state["stop"] = False
                 row = state["queue"].get_nowait()
-                self.assertEqual(decide.call_args.kwargs["feedback"], physical)
+                self.assertEqual(decide.call_args.kwargs["feedback"], with_motor_feedback(physical, state))
                 self.assertEqual(decide.call_args.kwargs["power_thresholds"], policy)
                 self.assertEqual((row["requested_level"], row["fan"]["execution"], row["fan"]["confirmed"]),
                                  (raw["requested"], "pending", False))
@@ -1325,6 +1564,67 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["controller"].level, 16)
         self.assertIs(state["motor_schedule"], schedule)
         self.assertEqual((schedule.attempts, schedule.last_attempt, schedule.last_decrease), (1, 10, 20))
+
+    async def test_simultaneous_settings_claims_keep_one_owner_and_admission_blocked(self):
+        state = self.app[STATE]
+        handler = self.handler('/api/settings')
+        closure = lambda fn: dict(zip(fn.__code__.co_freevars, (c.cell_contents for c in fn.__closure__)))
+        boundary = closure(handler)['admission']
+        original = boundary.publication
+        queued, enter, body_started, release = (asyncio.Event() for _ in range(4))
+        contenders, bodies = 0, 0
+
+        @asynccontextmanager
+        async def publication():
+            nonlocal contenders
+            contenders += 1
+            if contenders == 2:
+                queued.set()
+            await enter.wait()
+            async with original():
+                yield
+
+        async def body():
+            nonlocal bodies
+            bodies += 1
+            body_started.set()
+            await release.wait()
+            return dict(retention_days=7, max_log_mb=4096, manual_level=None)
+
+        async def save():
+            try:
+                return (await handler(SimpleNamespace(json=body))).status
+            except web.HTTPConflict:
+                return 409
+
+        with patch.object(boundary, 'publication', publication):
+            requests = [asyncio.create_task(save()) for _ in range(2)]
+            try:
+                await asyncio.wait_for(queued.wait(), 1)
+                enter.set()
+                await asyncio.wait_for(body_started.wait(), 1)
+                done, pending = await asyncio.wait(requests, timeout=1,
+                    return_when=asyncio.FIRST_COMPLETED)
+                self.assertEqual(len(done), 1, 'one concurrent save must be rejected before body completion')
+                self.assertEqual(next(iter(done)).result(), 409)
+                self.assertEqual(bodies, 1)
+                owner = state['settings_task']
+                self.assertIsNotNone(owner)
+                self.assertFalse(owner.done())
+                snapshot = json.loads((await self.handler('/api/status', 'GET')(None)).body)
+                self.assertTrue(snapshot['settings_pending'])
+                fan = closure(self.startup)['fan']
+                snapshot_request = closure(closure(fan)['apply_fan'])['request_snapshot']()
+                self.assertEqual(snapshot_request.snapshot.blocker, 'settings_revision_pending')
+                next(iter(pending)).cancel()
+                await asyncio.sleep(0)
+                self.assertIs(state['settings_task'], owner)
+            finally:
+                enter.set()
+                release.set()
+                results = await asyncio.gather(*requests, return_exceptions=True)
+        self.assertIsNone(state['settings_task'])
+        self.assertIn(409, results)
 
     async def test_save_ownership_installed_before_request_body_await(self):
         entered, release = asyncio.Event(), asyncio.Event()
@@ -1487,7 +1787,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             state["stop"] = False
             state["queue"] = asyncio.Queue(maxsize=2)
             state["settings"]["manual_level"] = level
-            state["controller"] = Controller(HOSTS)
+            state["controller"] = Controller(HOSTS, rules_only=True, high_wind_gate=True)
             state["fan"] = {"configured": True, "fault": False, "power": "on", "mode": "favorite",
                             "rpm": 1000, "level": 16, "verified_at": time.time(),
                             "observed_mono": time.monotonic(), "confirmed": True, "execution": "matched"}
@@ -1497,7 +1797,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 await monitor()
             self.assertEqual(decide.call_args.kwargs["manual_level"], level)
             self.assertEqual(decide.call_args.kwargs["minimum_level"], 0 if level is None else level)
-            self.assertEqual(decide.call_args.kwargs["feedback"], state["fan"])
+            self.assertEqual(decide.call_args.kwargs["feedback"], with_motor_feedback(state['fan'], state))
             self.assertIsNot(decide.call_args.kwargs["feedback"], state["fan"])
             self.assertEqual(state["decision"]["level"], 16)
             row = state["queue"].get_nowait()
@@ -1602,7 +1902,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         state["device"] = FakeFan()
         state["last_identity"] = time.monotonic()
         fan_loop = dict(zip(self.startup.__code__.co_freevars, (cell.cell_contents for cell in self.startup.__closure__)))["fan"]
-        def worker(device, target, schedule, *, read_only=None, high_wind_gate=True):
+        def worker(device, target, schedule, *, read_only=None, high_wind_gate=True, admission=None):
             entered.set()
             if not release.wait(3):
                 raise AssertionError("fan barrier release missing")
@@ -1625,8 +1925,10 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(contender.done())
             finally:
                 release.set()
+                if not running.done():
+                    running.cancel()
                 with self.assertRaises(asyncio.CancelledError):
-                    await running
+                    await asyncio.wait_for(running, 2)
                 self.assertTrue(finished.is_set())
                 if contender is not None:
                     await asyncio.wait_for(contender, 1)
@@ -2019,6 +2321,24 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         publish_test_request(state)
         response = await self.client.get("/api/status", headers={"Host": "127.0.0.1:8910"})
         self.assertEqual((await response.json())["requested_level"], 16)
+
+
+class ModeReadbackTests(unittest.TestCase):
+    def test_auto_register_remains_raw_without_claiming_a_favorite_endpoint(self):
+        device, schedule = FakeFan(["on", "auto", 16, 350]), MotorSchedule()
+        result = fan_apply(device, lambda: FanRequest(10), schedule)
+        self.assertEqual((result["level"], result["mode"], result["rpm"]), (16, "auto", 350))
+        self.assertFalse(result["confirmed"])
+        self.assertEqual((device.writes, schedule.attempts), ([], 0))
+
+    def test_restart_observation_cannot_clear_a_locked_auto_mode_budget(self):
+        device = FakeFan(["on", "auto", 16, 350])
+        schedule = MotorSchedule(attempts=2, expected_level=16, fault=True)
+        for unused in range(2):
+            result = fan_apply(device, lambda: FanRequest(10, protected=True), schedule)
+            self.assertFalse(result["confirmed"])
+            self.assertEqual((schedule.attempts, schedule.expected_level, schedule.fault), (2, 16, True))
+        self.assertEqual(device.writes, [])
 
 
 if __name__ == "__main__":

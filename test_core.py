@@ -1,6 +1,8 @@
 import json
+import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 from copy import deepcopy
@@ -429,10 +431,10 @@ class ControlTests(unittest.TestCase):
         self.decide(controller, self.fleet(100), 100)
         fleet = self.fleet(103)
         fleet[0]["source_ts"] = 20
-        self.assertIn("来源温度时间过期", " ".join(self.decide(controller, fleet, 103)["reasons"]))
+        self.assertIn("来源时间无效、过期", " ".join(self.decide(controller, fleet, 103)["reasons"]))
         fleet = self.fleet(106)
         fleet[0]["source_ts"] = 106
-        self.assertNotIn("来源温度时间过期", " ".join(self.decide(controller, fleet, 106)["reasons"]))
+        self.assertNotIn("来源时间无效、过期", " ".join(self.decide(controller, fleet, 106)["reasons"]))
         self.assertEqual(controller.history[HOSTS[0]][fleet[0]["sensors"][0]["id"]][-1][0], controller.fixture_start + 6)
 
     def test_thermal_throttling_and_lost_sensor_max(self):
@@ -492,6 +494,146 @@ class ControlTests(unittest.TestCase):
 
 
 class JournalTests(unittest.TestCase):
+    def test_noop_observed_sidecar_growth_cannot_exceed_reserved_capacity(self):
+        for orphan_bytes in (0, 8192):
+            with self.subTest(orphan_bytes=orphan_bytes), tempfile.TemporaryDirectory() as root:
+                journal = Journal(root)
+                journal.append(dict(ts=1000))
+                raw = journal.current
+                original = raw.read_bytes()
+                index = Path(str(raw) + '.bounds.json')
+                orphan = Path(root) / 'thermal-00000000000000000002.jsonl.bounds.json'
+                if orphan_bytes:
+                    orphan.write_bytes(b'x' * orphan_bytes)
+                inventoried_owned = journal.size()
+                limit = inventoried_owned + 1024 if orphan_bytes else 4096
+                sidecar_size = journal._sidecar_size
+                observed = []
+
+                def grow_index(path):
+                    if not observed:
+                        index.write_bytes(index.read_bytes() + b' ' * 4097)
+                    value = sidecar_size(path)
+                    observed.append(value)
+                    return value
+
+                with patch.object(journal, '_sidecar_size', side_effect=grow_index):
+                    result = journal.prune(5000, 1, limit)
+                self.assertEqual(result, 0)
+                self.assertGreater(observed[0] + len(original) + orphan_bytes, limit)
+                if orphan_bytes:
+                    self.assertLessEqual(observed[0] + len(original), inventoried_owned)
+                    self.assertEqual(orphan.read_bytes(), b'x' * orphan_bytes)
+                self.assertLessEqual(journal.size(), limit, 'successful prune exceeded reserved capacity')
+                self.assertEqual(raw.read_bytes(), original)
+                self.assertEqual(journal.retained_since, 1000)
+
+    def test_noop_certified_journal_completes_with_two_full_scans_within_budget(self):
+        for restarted in (False, True):
+            with self.subTest(restarted=restarted), tempfile.TemporaryDirectory() as root:
+                journal = Journal(root)
+                for index in range(3):
+                    with patch('core.time.time_ns', return_value=index + 1):
+                        journal.append(dict(ts=1000 + index * 900, nodes=[]))
+                original = {path.name: path.read_bytes() for path in Path(root).iterdir()}
+                if restarted:
+                    journal = Journal(root)
+                clock = dict(now=0, scans=0, visits=0)
+                real_scandir = os.scandir
+
+                @contextmanager
+                def budgeted_scandir(directory):
+                    clock['scans'] += 1
+                    with real_scandir(directory) as entries:
+                        def budgeted_entries():
+                            for entry in entries:
+                                clock['now'] += .09375
+                                clock['visits'] += 1
+                                yield entry
+                        yield budgeted_entries()
+
+                with patch('core.time.monotonic', side_effect=lambda: clock['now']), \
+                        patch('core.os.scandir', budgeted_scandir):
+                    self.assertEqual(journal.prune(5000, 1, 1048576), 0)
+                self.assertLessEqual(clock['scans'], 2)
+                self.assertLessEqual(clock['visits'], 12)
+                self.assertLessEqual(clock['now'], 2)
+                self.assertEqual({path.name: path.read_bytes() for path in Path(root).iterdir()}, original)
+                self.assertEqual(journal.retained_since, 1000)
+                self.assertEqual(Journal.PRUNE_SECONDS, 2)
+                self.assertEqual(Journal.PRUNE_BYTES, 8388608)
+
+    def test_noop_denies_shortcut_after_second_namespace_or_raw_identity_change(self):
+        for change in ('namespace', 'raw_identity', 'replacement'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as root:
+                journal = Journal(root)
+                journal.append(dict(ts=1000))
+                path = journal.current
+                inventory = journal._inventory
+                clock = dict(now=0, scans=0)
+                changed = Path(root) / 'thermal-00000000000000000002.jsonl' if change == 'namespace' else path
+                content = b'{"ts":2000}\n' if change == 'replacement' else b'{"ts":2000,"changed":true}\n'
+
+                def changed_inventory(directory, work):
+                    clock['scans'] += 1
+                    if clock['scans'] == 2:
+                        if change == 'replacement':
+                            replacement = Path(root) / 'replacement'
+                            replacement.write_bytes(content)
+                            self.assertEqual(replacement.stat().st_size, path.stat().st_size)
+                            replacement.replace(path)
+                        else:
+                            changed.write_bytes(content)
+                    if clock['scans'] > 2:
+                        clock['now'] = 3
+                    return inventory(directory, work)
+
+                with patch('core.time.monotonic', side_effect=lambda: clock['now']), \
+                        patch.object(journal, '_inventory', side_effect=changed_inventory):
+                    with self.assertRaises(TimeoutError):
+                        journal.prune(5000, 1, 1048576)
+                self.assertEqual(changed.read_bytes(), content)
+
+    def test_noop_fresh_orphan_capacity_refusal_precedes_retention_deletion(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = Journal(root)
+            journal.append(dict(ts=0))
+            path = journal.current
+            original = path.read_bytes()
+            inventory = journal._inventory
+            scans = 0
+            orphan = Path(root) / 'thermal-00000000000000000002.jsonl.bounds.json'
+
+            def changed_inventory(directory, work):
+                nonlocal scans
+                scans += 1
+                if scans == 2:
+                    orphan.write_bytes(b'x' * 4097)
+                return inventory(directory, work)
+
+            with patch.object(journal, '_inventory', side_effect=changed_inventory):
+                with self.assertRaisesRegex(OSError, '日志孤立索引或工作文件超出容量'):
+                    journal.prune(100000, 1, 4096)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(orphan.stat().st_size, 4097)
+
+    def test_noop_checks_original_deadline_after_retained_since_accounting(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = Journal(root)
+            journal.append(dict(ts=1000))
+            clock = dict(now=0)
+
+            class DelayedValidity(tuple):
+                def __getitem__(self, index):
+                    if index == 2:
+                        clock['now'] = 3
+                    return super().__getitem__(index)
+
+            journal.ranges[journal.current] = DelayedValidity(journal.ranges[journal.current])
+            with patch('core.time.monotonic', side_effect=lambda: clock['now']):
+                with self.assertRaises(TimeoutError):
+                    journal.prune(5000, 1, 1048576)
+
     def test_restart_prune_retains_samples_without_reopening_segment_bodies(self):
         with tempfile.TemporaryDirectory() as root:
             journal = Journal(root)

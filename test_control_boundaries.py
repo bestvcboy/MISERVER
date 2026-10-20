@@ -14,11 +14,12 @@ class CriticalConfirmationTests(unittest.TestCase):
         decision = controller.decide(fleet(103, cpu=80, gpu=47, board=54, load=35, power=60),
             103, minimum_level=0, feedback=feedback(103, 6))
         self.assertEqual(controller.operating.confirmed_level, 6)
-        self.assertEqual((decision['level'], decision['demand']), (16, 16))
-        self.assertIsNotNone(controller.motion.source)
+        self.assertEqual((decision['level'], decision['demand']), (6, 10))
+        self.assertIsNone(controller.motion.source)
+        self.assertEqual(decision['normal_ceiling'], 16)
 
     def test_current_critical_temperature_wins_in_descent_confirmation_frame(self):
-        for temperature, expected in ((75, 10), (79.9, 10), (80, 16)):
+        for temperature, expected in ((75, 10), (79.9, 10), (80, 10)):
             with self.subTest(temperature=temperature):
                 controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
                 for now in range(0, 211, 3):
@@ -30,8 +31,10 @@ class CriticalConfirmationTests(unittest.TestCase):
                 self.assertEqual(controller.operating.confirmed_level, 9)
                 self.assertEqual(decision['level'], expected)
                 self.assertEqual(decision['demand'], expected)
-                self.assertIsNotNone(controller.motion.source)
-                self.assertEqual(controller.motion.actual_c, temperature)
+                self.assertTrue(controller.export_thermal_memory()['failures'])
+                if temperature < 80:
+                    self.assertIsNotNone(controller.motion.source)
+                    self.assertEqual(controller.motion.actual_c, temperature)
 
 
 class DescentOwnershipTests(unittest.TestCase):

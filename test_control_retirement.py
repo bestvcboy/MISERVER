@@ -14,9 +14,9 @@ class ControlFixture:
         return controller.decide(fleet(now, cpu=cpu, gpu=47, board=54, **values), now,
             minimum_level=0, feedback=feedback(now, actual) if observed is None else observed)
 
-    def hot(self):
+    def hot(self, actual=10):
         controller = self.controller()
-        self.step(controller, 100, cpu=80)
+        self.step(controller, 100, actual=actual, cpu=80)
         return controller, controller._policy['operation']['episode']
 
 
@@ -37,24 +37,29 @@ class RetirementTests(ControlFixture, unittest.TestCase):
                 self.assertFalse(controller.feedback_matches_request(10, 103, 103))
 
     def test_repeated_ceiling_does_not_renew_destination_or_deadline(self):
-        controller, episode = self.hot()
+        controller, episode = self.hot(actual=15)
+        replacement = None
         for now in (103, 106, 109, 112):
             decision = self.step(controller, now, actual=16)
             operation = controller._policy['operation']
-            self.assertIs(operation['episode'], episode)
+            replacement = operation['episode'] if replacement is None else replacement
+            self.assertIs(operation['episode'], replacement)
+            self.assertIsNot(replacement, episode)
             self.assertEqual(operation['destination_requested_at'], 103)
-            self.assertEqual(operation['original_deadline'], 160)
-            self.assertEqual(decision['execution_trial']['original_to'], 16)
+            self.assertEqual(operation['original_deadline'], 163)
+            self.assertEqual(decision['execution_trial']['original_to'], 15)
+            self.assertEqual(decision['level'], 15)
+            self.assertEqual(decision['execution_trial']['status'], 'pending')
             self.assertIsNone(controller._policy['last_downward'])
-        self.assertFalse(controller.feedback_matches_request(10, 103, 112))
-        decision = self.step(controller, 115)
+        self.assertFalse(controller.feedback_matches_request(10, 113, 113))
+        decision = self.step(controller, 115, actual=15)
         self.assertEqual(decision['execution_trial']['status'], 'confirmed')
-        self.assertIsNone(controller._policy['last_downward'])
+        self.assertEqual(controller._policy['last_downward']['edge'], (16, 15))
         self.assertEqual(controller.operating.observe_credit, 0)
 
     def test_same_protect_preserves_pending_budget_and_independent_critical(self):
         controller, episode = self.hot()
-        self.step(controller, 103, actual=16)
+        self.step(controller, 103, observed=feedback(90, 10))
         operation = controller._policy['operation']
         controller.motion = MotionAuthority(103, ('host', 'cpu'), 75, 75)
         for now in (104, 105):
@@ -86,7 +91,7 @@ class RetirementTests(ControlFixture, unittest.TestCase):
         decision = self.step(controller, 106, actual=16,
             observed=feedback(106, 16, confirmed=False, execution='pending'))
         self.assertEqual(controller.operating.confirmed_level, 16)
-        self.assertEqual(decision['level'], 10)
+        self.assertEqual(decision['level'], 16)
         self.assertEqual(decision['execution_trial']['status'], 'invalidated')
         self.assertEqual(controller._policy['operation'], historical)
         self.assertIsNone(controller._policy['last_downward'])
@@ -95,7 +100,7 @@ class RetirementTests(ControlFixture, unittest.TestCase):
         controller, _ = self.hot()
         decision = self.step(controller, 160, actual=16)
         self.assertEqual(decision['execution_trial']['status'], 'execution_timeout')
-        self.assertEqual(decision['execution_trial']['to'], 16)
+        self.assertEqual(decision['execution_trial']['to'], 11)
         self.assertIsNone(controller._policy['operation']['confirmed_at'])
         self.assertTrue(controller._policy['startup_required'])
         self.step(controller, 163, observed=feedback(160, 10))
@@ -120,13 +125,19 @@ class RetirementTests(ControlFixture, unittest.TestCase):
 
     def test_protect_at_deadline_retires_before_later_poll(self):
         controller, _ = self.hot()
+        operation = controller._policy['operation']
         decision = controller.protect('storage', 160)
         self.assertEqual(decision['execution_trial']['status'], 'execution_timeout')
         self.assertTrue(controller._policy['startup_required'])
-        for now in (163, 166, 250):
-            decision = self.step(controller, now, actual=10, cpu=80)
-            self.assertEqual(decision['execution_trial']['original_deadline'], 160)
-            self.assertEqual(decision['execution_trial']['status'], 'execution_timeout')
+        decision = self.step(controller, 163, actual=10, cpu=80)
+        self.assertEqual(decision['execution_trial']['original_deadline'], 160)
+        self.assertEqual(decision['execution_trial']['status'], 'execution_timeout')
+        decision = self.step(controller, 166, actual=10, cpu=80)
+        self.assertEqual(operation['original_deadline'], 160)
+        self.assertIsNone(operation['episode'])
+        self.assertEqual(decision['level'], 11)
+        self.assertEqual(decision['execution_trial']['original_deadline'], 226)
+        self.assertIsNot(controller._policy['operation'], operation)
 
     def test_thermal_invalidation_and_aba_do_not_end_execution(self):
         for production in (False, True):
@@ -174,11 +185,11 @@ class ObservationTests(ControlFixture, unittest.TestCase):
         controller = self.controller()
         for now in range(0, 91, 3):
             self.step(controller, now, load=35, power=70)
-        self.assertIsNotNone(controller.operating.workload_epoch)
+        self.assertEqual(controller._workload_cycle.phase, 'stable_loaded')
         cleared_at = None
         for now in range(93, 241, 3):
             self.step(controller, now, load=5, power=60)
-            if controller.operating.workload_epoch is None:
+            if controller._workload_cycle.phase == 'idle':
                 cleared_at = now
                 break
         self.assertIsNotNone(cleared_at)

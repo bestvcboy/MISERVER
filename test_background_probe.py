@@ -8,6 +8,7 @@ from pathlib import Path
 from core import Controller
 from test_core import HOSTS
 from test_scenarios import feedback, fleet, heat_to_target_risk
+from thermal_policy import source_timing
 
 
 def replay_trace(name, mode):
@@ -20,13 +21,19 @@ def replay_trace(name, mode):
     controller, actual, pending = Controller(HOSTS), 16, None
     events, confirmations, successes, outcomes, invalidations = [], {}, {}, {}, []
     previous = None
+    timing_refusals = 0
     for row in rows:
         now = row['learning']['mono']
+        refused = sum(source_timing(node, now) is None for node in row['nodes'])
+        timing_refusals += refused
         if mode == 'delayed' and pending and row['fan']['observed_mono'] - pending[0] >= 45:
             actual, pending = pending[1], None
         readback = row['fan'] if mode == 'original' else dict(row['fan'], level=actual, confirmed=True, execution='matched')
         decision = controller.decide(row['nodes'], now, minimum_level=0, feedback=readback,
                                      power_thresholds=row['active_power_policy'])
+        if refused:
+            assert decision['level'] == 16, 'untrusted historical timing must not permit descent'
+            assert any('来源时间无效、过期' in reason for reason in decision['reasons'])
         trial = controller.trial
         if trial and trial['outcome'] is not None:
             if trial['outcome'] == 'invalidated' and outcomes.get(trial['requested_at']) != 'invalidated':
@@ -61,7 +68,8 @@ def replay_trace(name, mode):
                 pending = (now, decision['level'])
     return {'mode': mode, 'frames': len(rows), 'events': events,
             'confirmations': list(confirmations.values()), 'successes': list(successes.values()),
-            'outcomes': list(outcomes.values()), 'invalidations': invalidations}
+            'outcomes': list(outcomes.values()), 'invalidations': invalidations,
+            'timing_refusals': timing_refusals}
 
 
 def background(now, *, cpu=51):
@@ -91,34 +99,16 @@ class BackgroundProbeTests(unittest.TestCase):
 
     def test_immutable_integrated_replays_and_readback_truth(self):
         for name in ('lower-airflow-live-trace.json', 'background-probe-long-trace.json'):
-            following = replay_trace(name, 'following')
-            expected_minimum = 15 if name == 'lower-airflow-live-trace.json' else 14
-            self.assertEqual(min(gear for _, gear, _ in following['events']), expected_minimum)
-            self.assertEqual(following['confirmations'], [])
-            self.assertEqual(following['successes'], [])
-            self.assertNotIn('failed', following['outcomes'])
-            self.assertEqual(set(following['outcomes']), {'recovery_released'})
-            for mode in ('original', 'delayed'):
+            expected_refusals = 51 if name == 'lower-airflow-live-trace.json' else 64
+            for mode in ('following', 'original', 'delayed'):
                 with self.subTest(trace=name, mode=mode):
                     result = replay_trace(name, mode)
-                    if mode == 'original':
-                        self.assertEqual(min(gear for _, gear, _ in result['events']), 16)
-                        self.assertEqual(result['confirmations'], [])
-                        self.assertEqual(result['successes'], [])
-                    else:
-                        self.assertEqual(result['confirmations'], [])
-                        self.assertEqual(result['successes'], [])
-                        self.assertNotIn('failed', result['outcomes'])
-                        self.assertEqual(min(gear for _, gear, _ in result['events']), 15)
-                        expected_outcomes = {'invalidated'} if name == 'lower-airflow-live-trace.json' else {'invalidated', 'recovery_released'}
-                        self.assertEqual(set(result['outcomes']), expected_outcomes)
-                        self.assertEqual(len(result['invalidations']), 1)
-                        revoked = result['invalidations'][0]
-                        self.assertGreaterEqual(revoked['maximum_load'], 10)
-                        self.assertEqual((revoked['original_from'], revoked['original_to'], revoked['to'], revoked['actual'], revoked['requested']),
-                                         (16, 15, 16, 16, 16))
-                        self.assertEqual(revoked['original_deadline'], revoked['requested_at'] + 60)
-                        self.assertTrue(revoked['requested_at'] < revoked['destination_requested_at'] < revoked['original_deadline'])
+                    self.assertEqual(result['timing_refusals'], expected_refusals)
+                    self.assertEqual(min(gear for _, gear, _ in result['events']), 16)
+                    self.assertEqual(result['confirmations'], [])
+                    self.assertEqual(result['successes'], [])
+                    self.assertEqual(result['outcomes'], [])
+                    self.assertEqual(result['invalidations'], [])
 
     def test_stable_temperatures_with_delayed_execution_confirm_before_success(self):
         controller, actual, pending = Controller(HOSTS), 16, None

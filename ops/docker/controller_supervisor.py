@@ -90,7 +90,8 @@ def preflight(state=STATE, admission=ADMISSION):
         raise ValueError('Insufficient free storage')
     return dict(release=RELEASE, catalog_sha256=expected['catalog_sha256'],
                 state_identity=expected['state_identity'], index=index, motor_fault=budget.fault,
-                motor_attempts=budget.attempts, settings=settings, strategy_mode='rules',
+                motor_attempts=budget.attempts, motor_legacy_pending=budget.legacy_pending,
+                motor_budget_version=budget.schema_version, settings=settings, strategy_mode='rules',
                 learning_enabled=False, high_wind_gate=True, learning_preserved_bytes=learning_usage['preserved_bytes'])
 
 
