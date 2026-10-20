@@ -15,6 +15,11 @@ from service import MOTOR_IDENTITY
 
 
 class HealthTests(unittest.TestCase):
+    def test_formal_controller_reserves_one_cpu_for_sampling_and_journal(self):
+        lines = (Path(__file__).with_name('compose.yaml')).read_text(encoding='utf-8').splitlines()
+        self.assertEqual([line.split(':', 1)[1].strip() for line in lines
+                          if line.strip().startswith('cpus:')], ['1.0'])
+
     def test_foreign_pid_and_malformed_packets_do_not_refresh_watchdog(self):
         health = control.Health(42, 100)
         for packet in (b'READY=1', b'WATCHDOG=1'):
@@ -65,7 +70,9 @@ class NativeControllerTests(unittest.TestCase):
             before = {p.relative_to(state).as_posix():p.read_bytes() for p in state.rglob('*') if p.is_file()}
             with patch.object(control.check,'CATALOG',catalog), patch.object(control.check,'validate_catalog'), patch.object(control.ssl.SSLContext,'load_cert_chain'):
                 result = control.preflight(state,admission)
-                self.assertEqual((result['motor_attempts'],result['motor_fault']), (2,True))
+                self.assertEqual((result['motor_attempts'],result['motor_fault']), (2,False))
+                self.assertTrue(result['motor_legacy_pending'])
+                self.assertEqual(result['motor_budget_version'], 1)
                 self.assertEqual((result['strategy_mode'], result['learning_enabled']), ('rules', False))
                 self.assertEqual(result['learning_preserved_bytes'], 46)
                 for changes in ({'state':'blocked'},{'catalog_sha256':'0'*64},{'authorization':'historical_trial'},{'state_identity':[0,0]}):

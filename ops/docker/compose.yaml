@@ -12,7 +12,7 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: 256m
     pids_limit: 32
-    cpus: 0.5
+    cpus: 1.0
     ulimits:
       core: {soft: 0, hard: 0}
     tmpfs:

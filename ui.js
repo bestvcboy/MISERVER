@@ -12,8 +12,8 @@ let settingsDirty = false;
 let settingsSaving = false;
 let settingsUnknown = false;
 const settingsControls = ['retention', 'capacity', 'control-mode', 'settings-save', 'settings-cancel'];
-const modeOptions = [new Option('自动温控 · 固定规则平稳调节', 'automatic'),
-  ...Array.from({length:17}, (_, level) => new Option(`手动 ${level} 档${level === 0 ? ' · 仍在运转' : ''}`, String(level)))];
+const modeOptions = [new Option('软件自动温控 · 固定规则平稳调节', 'automatic'),
+  ...Array.from({length:17}, (_, level) => new Option(`手动最低档 ${level} 档${level === 0 ? ' · 仍在运转' : ''}`, String(level)))];
 $('control-mode').replaceChildren(...modeOptions);
 $('control-mode').value = '16';
 
@@ -32,39 +32,55 @@ async function api(path, body) {
 
 function render(data) {
   current = data;
-  const fresh = data.controller_age_seconds <= 6 && data.server_time - data.updated_at <= 9;
+  const fresh = Number.isFinite(data.controller_age_seconds) && data.controller_age_seconds >= 0
+    && data.controller_age_seconds <= 6 && Number.isFinite(data.server_time) && data.server_time >= 0
+    && Number.isFinite(data.updated_at) && data.updated_at >= 0
+    && data.server_time - data.updated_at >= 0 && data.server_time - data.updated_at <= 9;
   const online = data.nodes.filter(node => node.online && fresh).length;
   $('online-count').textContent = `${online} / 4 在线`;
   $('live-text').textContent = fresh ? '实时采集' : '采集异常';
   $('live-dot').style.background = fresh ? '#47dfb6' : '#ff8791';
   $('updated').textContent = data.updated_at ? `更新于 ${new Date(data.updated_at * 1000).toLocaleTimeString('zh-CN')}` : '等待采样';
-  $('policy').textContent = data.settings.manual_level === null ? '已保存 · 自动预防性温控' : `已保存 · 手动 ${data.settings.manual_level} 档`;
-  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision) + (data.high_wind_gate ? ` 当前风力上限 ${data.high_wind_limit} 档。${data.high_wind_limit > 10 ? "当前可信实温至少80°C，允许高风力；高温平台或降温但仍达80°C不会因趋势改变撤权。" : "没有新鲜可信的80°C高温证据，请求不超过10档。实际档位以受限执行和转速读回为准。"}` : "");
+  $('policy').textContent = data.settings.manual_level === null ? '已保存 · 软件自动温控' : `已保存 · 手动最低档 ${data.settings.manual_level} 档`;
+  const enhanced80 = data.decision?.policy_spec?.enhanced_admission_c === 80;
+  $('policy-detail').textContent = `当前场景：${data.decision?.scenario_detail || '旧记录未标注场景'}。有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。` + trialDetails(data.decision) + (data.high_wind_gate ? ` 当前${enhanced80 ? '普通上限' : '可写上限'} ${data.high_wind_limit} 档。` + highWindDetails(data.decision) + (enhanced80 ? ' 普通上限不等于退出过程的本步指令或实际档位。故障保护例外须有独立证据，实际以正转速读回为准。' : ' 实际档位以受限执行和转速读回为准。撤权冻结未获资格的下降。') : '');
+  if (data.settings.manual_level !== null) $('policy-detail').textContent += ` 所选最低档 ${data.settings.manual_level} 档是手动设置，温度与通信保护可提高需求，高风门控可限制有效请求；不保证固定在所选档位。`;
+  $('policy-detail').textContent += controlDetails(data.decision, false);
+  const memory = data.thermal_memory;
+  if (memory && memory.state !== 'not_applicable') $('policy-detail').textContent += memoryDetails(memory);
   renderLearning(data.learning || {});
+  const spec = data.decision?.policy_spec;
+  $('policy-parameters').textContent = spec ? `策略 ${spec.version}。档位 ${spec.minimum_level} 至 ${spec.maximum_level}，普通权限上限 ${spec.ordinary_ceiling}。`
+    + ` 工作目标 CPU ${spec.targets_c?.cpu}°C / GPU ${spec.targets_c?.gpu}°C / 其他 ${spec.targets_c?.board}°C，可信实温危急线 ${spec.critical_c}°C。`
+    + ` 自动每次下降 ${spec.descent_step} 档，合格观察 ${spec.observe_seconds} 秒；空闲余量 ${spec.idle_margin_c}°C，稳定负载或慢回升余量 ${spec.loaded_margin_c}°C。`
+    + ` 负载预备可比观察 ${spec.preparation_seconds} 秒；慢回升风险范围 ${spec.drift_horizon_seconds} 秒，常规慢回升斜率 ${spec.drift_rate_c_per_second}°C/s，累计额度 ${spec.warming_budget_c}°C。有界观察不代表允许执行；已减缓的小幅回温另验同源余量。`
+    + (enhanced80 ? ' 普通增强须可信实温达到80°C。80°C不是器件安全上限。低于80°C且实际高于10档时，按电机约束逐档退出至10档，不等待普通180秒观察或负载可比窗口；可靠保存、真实反馈和故障保护仍有效。'
+      : spec.high_exit ? ` 高档退出单独核验，先取本档趋势 ${spec.high_exit.trend_seconds} 秒，再积累 ${spec.high_exit.observation_seconds} 秒合格观察；距危急线的原始预测余量至少${spec.high_exit.margin_c}°C，退出链温升额度${spec.high_exit.warming_budget_c}°C。` : '')
+    + ' 均为暂定工程值，尚非现场标定保证。' : '服务未返回当前策略规格，不能从旧页面推断已部署策略。';
   $('desired').textContent = data.requested_level;
   $('gear-bar').innerHTML = Array.from({length:16}, (_, index) => `<i class="${index < data.requested_level ? 'on' : ''}"></i>`).join('');
-  const fanFresh = Number.isFinite(data.fan.verified_at) && Number.isFinite(data.server_time)
-    && data.server_time - data.fan.verified_at >= 0 && data.server_time - data.fan.verified_at <= 9
-    && data.controller_age_seconds <= 6;
-  const fanConfirmed = data.fan.configured && data.fan.confirmed && fanFresh && data.fan.level === data.requested_level
-    && data.fan.power === 'on' && data.fan.mode === 'favorite'
-    && Number.isFinite(data.fan.rpm) && data.fan.rpm > 0 && !data.fan.fault && data.fan.execution === 'matched';
-  $('actual').textContent = !data.fan.configured ? '待绑定' : fanFresh && data.fan.level !== null ? `${data.fan.level} 档` : '未确认';
+  const fanAt = Number.isFinite(data.controller_age_seconds) && data.controller_age_seconds >= 0
+    && data.controller_age_seconds <= 6 ? data.server_time : null;
+  const readback = fanReadback(data.fan, fanAt, data.requested_level);
+  const fanFresh = readback.fresh;
+  const fanConfirmed = readback.matched;
+  $('actual').textContent = !data.fan.configured ? '待绑定' : readback.actual !== null ? `${readback.actual} 档` : '未确认';
+  $('fan-setting').textContent = fanSetting(data.fan);
   $('rpm').textContent = fanFresh ? `${numeric(data.fan.rpm, 0)} RPM · ${data.fan.mode || '模式未知'}` : '尚无有效转速读回';
   $('readback-time').textContent = `读回于 ${historyTime(data.fan.verified_at)}${fanFresh ? '' : ' · 当前不可确认'}`;
   const ambientAt = Number.isFinite(data.controller_age_seconds) && data.controller_age_seconds >= 0
     && data.controller_age_seconds <= 6 ? data.server_time : null;
   $('ambient').textContent = ambientReadback(data.fan, ambientAt)
     + (Number.isFinite(ambientAt) ? '' : ' · 当前不可确认');
-  $('fan-status').textContent = fanConfirmed ? '电源、模式、档位与转速已读回' : data.fan.error || '等待当前请求的设备读回';
-  $('execution').textContent = data.fan.fault ? '故障锁定 · 只读观察' : data.fan.execution === 'pending' ? '最新请求待执行' : fanConfirmed ? '实际匹配' : '等待读回';
+  $('fan-status').textContent = fanConfirmed ? '电源、模式、档位与转速已读回' : data.fan.error || (readback.actual !== null ? '实际档位已知，当前请求尚未确认' : '等待当前请求的设备读回');
+  $('execution').textContent = data.fan.fault || data.fan.execution === 'fault' ? '故障锁定 · 只读观察' : data.fan.execution === 'pending' ? '最新请求待执行' : fanConfirmed ? '实际匹配' : '等待读回';
   $('pair-state').textContent = data.fan.configured ? '凭据已配置' : '需要连接';
   $('binding-state').textContent = !data.fan.configured ? '尚未配置本地执行凭据。' : fanConfirmed ? '本地凭据已配置，当前请求已获实际读回确认。现场散热标定仍待完成。' : '本地凭据已配置，当前执行尚未确认。' + (data.fan.error || '等待读回。');
   let alarm = '';
   if (!fresh) alarm = `采集循环异常。当前温度不可视为实时，保护请求 ${data.requested_level} 档。`;
   else if (['readback_hold', 'communication_hold'].includes(data.decision?.scenario)) alarm = fanConfirmed
     ? `通信恢复确认中，请求 ${data.requested_level} 档，暂停降档。`
-    : `通信暂时中断，请求 ${data.requested_level} 档并暂停降档；实际风力${fanFresh ? `为 ${data.fan.level} 档` : '未知'}，正在重试。`;
+    : `通信暂时中断，请求 ${data.requested_level} 档并暂停降档；实际风力${readback.actual !== null ? `为 ${readback.actual} 档` : '未知'}，正在重试。`;
   else if (online < 4) alarm = `部分节点采集失败，实际温度未知；当前保护请求 ${data.requested_level} 档。`;
   else if (data.decision?.scenario === 'protect' || data.nodes.some(node =>
            node.cpu_temp >= (data.decision?.limits?.cpu?.[1] ?? 75) - 2
@@ -73,9 +89,10 @@ function render(data) {
     alarm = `当前保护请求 ${data.requested_level} 档。${data.fan.fault ? '执行预算故障锁定，保持只读。' : fanConfirmed ? '已匹配实际读回；RPM 不证明散热能力。' : '实际执行尚未确认，请查看具体保护原因。'}`;
   else if (data.nodes.some(node => node.cpu_temp >= (data.decision?.limits?.cpu?.[0] ?? 60)
            || node.gpu_temp >= (data.decision?.limits?.gpu?.[0] ?? 60)))
-    alarm = `温度达到 60°C 准备区，需求至少 10 档。当前请求 ${data.requested_level}，实际 ${fanFresh ? data.fan.level : "未确认"} 档；持续缺口另行逐级评估。`;
-  else if (data.storage_health?.phase === 'holding') alarm = `日志暂态中断，限时暂停下降；当前实际 ${fanFresh ? data.fan.level : '未知'} 档，温度保护继续有效。`;
-  else if (!fanConfirmed) alarm = data.fan.error || '风力尚未确认。温度记录正在运行。';
+    alarm = `温度达到 60°C 准备区，需求至少 10 档。当前请求 ${data.requested_level}，实际 ${readback.actual ?? '未确认'} 档；持续缺口另行逐级评估。`;
+  else if (data.storage_health?.phase === 'holding') alarm = `日志暂态中断，限时暂停下降；当前实际 ${readback.actual ?? '未知'} 档，温度保护继续有效。`;
+  else if (memory && !['ready', 'not_applicable'].includes(memory.state)) alarm = memoryDetails(memory);
+  else if (!fanConfirmed) alarm = data.fan.error || (readback.actual !== null ? `实际 ${readback.actual} 档，当前请求尚未确认匹配。温度记录正在运行。` : '风力尚未确认。温度记录正在运行。');
   else if (data.settings_error || data.storage_error) alarm = data.settings_error || data.storage_error;
   $('alarm').className = `alarm ${alarm ? 'bad' : 'ok'}`;
   $('alarm').textContent = alarm || '四台节点实时采集，散热设备读回正常。';
@@ -89,7 +106,7 @@ function render(data) {
   $('reasons').innerHTML = (data.decision.reasons || []).map(reason => `<li>${escape(reason)}</li>`).join('');
   $('log-size').textContent = `${numeric(data.log_bytes / 1048576, 2)} / ${data.settings.max_log_mb} MiB`;
   $('usage-fill').style.width = `${Math.min(100, data.log_bytes / (data.settings.max_log_mb * 1048576) * 100)}%`;
-  $('storage-status').textContent = data.storage_error || `3 秒采样 · 保留 ${data.settings.retention_days} 天 · 丢失记录 ${data.dropped_records}`;
+  $('storage-status').textContent = data.storage_error || `控制周期 ${numeric(data.control_period_seconds ?? data.period_seconds, 1)} 秒 · 记录周期 ${numeric(data.record_period_seconds ?? data.period_seconds, 1)} 秒 · 保留 ${data.settings.retention_days} 天 · 丢失记录 ${data.dropped_records}`;
   if ((!initialized || !settingsDirty) && !settingsSaving && !settingsUnknown) adoptSettings(data.settings);
   if (settingsUnknown && !data.settings_pending) {
     settingsUnknown = false;
@@ -203,17 +220,45 @@ function ambientReadback(fan, at) {
   return `净化器本地温度 ${numeric(fan.ambient_c)} °C · 未校准环境参考，仅记录，尚未用于控制 · ${state} · 采样 ${historyTime(fan.ambient_verified_at)} · 来源 ${fan.ambient_source || '未知'}`;
 }
 
-function historyReadback(sample) {
-  const fan = sample.fan || {};
-  const age = Number.isFinite(sample.snapshot_at) && Number.isFinite(fan.verified_at)
-    ? sample.snapshot_at - fan.verified_at : null;
+function fanReadback(fan, at, requested) {
+  const age = Number.isFinite(at) && at >= 0 && Number.isFinite(fan.verified_at) && fan.verified_at >= 0
+    ? at - fan.verified_at : null;
+  const fresh = age !== null && age >= 0 && age <= 9;
+  const actual = fresh && fan.configured === true && fan.power === 'on' && fan.mode === 'favorite'
+    && Number.isInteger(fan.level) && fan.level >= 0 && fan.level <= 16
+    && Number.isFinite(fan.rpm) && fan.rpm > 0 && !fan.fault && fan.execution !== 'fault' ? fan.level : null;
+  const matched = actual !== null && fan.confirmed === true && actual === requested
+    && (fan.execution === 'matched' || fan.execution == null);
+  return {age, fresh, actual, matched};
+}
+
+function fanSetting(fan) {
+  const mode = {auto:'设备自动', favorite:'favorite 定档'}[fan.mode] || fan.mode || '模式未知';
+  return `${fan.power ?? '电源未知'} / ${mode} · favorite 设置 ${fan.level ?? '未知'} · 设置值本身不等于实际档位`;
+}
+
+function historyReadback(readback) {
+  const {age, actual, matched} = readback;
   let state = age === null ? '读回时效未知' : age < 0 ? '读回时间异常' : age > 9 ? '读回已过期' : '已读回，未确认匹配';
-  if (age !== null && age >= 0 && age <= 9 && fan.configured && fan.confirmed && !fan.fault
-      && fan.execution !== 'fault' && fan.power === 'on' && fan.mode === 'favorite'
-      && Number.isFinite(fan.level) && fan.level === sample.requested_level && Number.isFinite(fan.rpm) && fan.rpm > 0) {
-    state = '记录时实际匹配';
-  }
+  if (actual !== null) state = matched ? '记录时实际匹配' : '记录时实际档位已知，未确认请求匹配';
   return `${state}${age !== null && age >= 0 ? ` · 距快照 ${numeric(age)} 秒` : ''}`;
+}
+
+function highWindDetails(decision) {
+  const high = decision?.high_wind;
+  if (!high || typeof high !== 'object') return '高风证据未知，旧记录不补推断。';
+  const labels = {normal:'普通需求', observing:'实际10档观察中', empirical:'有界实测增强', recovering:'安全退出或精确恢复', critical:'当前实温危急保护', expired:'实测周期已到期', degraded:'证据不足，暂停下降', source_fault:'温度来源异常诊断'};
+  const exceptions = {SourceFaultProtection:'温度来源故障保护例外', FailedDescentRestoration:'真实降档失败的精确恢复例外'};
+  const exception = high.exception ? (typeof high.exception === 'string' && Object.hasOwn(exceptions, high.exception)
+    ? exceptions[high.exception] : '保护例外类型未知，不能据此确认高风权限') : '';
+  const enhanced80 = decision?.policy_spec?.enhanced_admission_c === 80;
+  const source = Array.isArray(high.source) ? high.source.map(value => String(value).slice(0, 160)).join(' / ') : '来源未知';
+  const admission = enhanced80
+    ? ' 普通增强门槛为可信实温80°C。75°C风险告警、工作目标不足、功率与预测均不能单独授予高档；80°C不是器件安全上限。'
+    : '工作60/65°C、危急75°C均为暂定工程值。未经标定的预测不单独授予高风增强权限。';
+  const state = enhanced80 && high.reason === 'critical' ? '可信实温达到普通增强准入门槛' : labels[high.reason] || '高风状态未知';
+  return (exception ? `${exception}，不是普通增强，实际方向以本步指令和读回为准。` : '')
+    + `${state}。${String(high.detail || '').slice(0, 240)} 来源 ${source}，实温 ${numeric(high.actual_c)}°C，观察 ${numeric(high.observation_seconds, 0)}秒。` + admission;
 }
 
 function trialDetails(decision) {
@@ -232,14 +277,133 @@ function trialDetails(decision) {
   return operating + current + previous + blocked;
 }
 
+function memoryDetails(memory) {
+  const labels = {ready:'热记忆已可靠保存', pending:'热记忆等待可靠保存，暂停下降',
+    failed:'热记忆保存失败，暂停下降', invalid:'热记忆缺失或损坏，保留故障证据并暂停下降'};
+  return ` ${labels[memory.state] || '热记忆状态未知，不能确认下降资格'}。${memory.descent_allowed === true ? '' : '保持和有权限的保护上调仍可执行。'}`;
+}
+
+function controlDetails(decision, includeMemory = true) {
+  const status = decision?.control_status;
+  if (!status || typeof status !== 'object') return '';
+  const source = Array.isArray(status.blocking_source) ? status.blocking_source.join(' / ') : status.blocking_source;
+  const labels = {hold:'暂停下降', observing:'合格观察', critical:'危急保护', recovering:'恢复安全端点',
+    preparing:'负载预备', settled:'稳定负载', stable_loaded:'稳定负载', idle:'空闲', waiting_execution:'等待执行',
+    measured_critical:'可信实温达到危急线', attributed_descent_failure:'已归因的试降热失败',
+    memory_capacity:'热记忆容量边界', unresolved_descent:'重启前下降尚未核实',
+    failed_descent_floor:'失败低档尚未康复', warming_budget_exhausted:'累计温升额度已耗尽',
+    stationary_envelope:'已验证的安全往返波动',
+    bounded_drift_observation:'回温预测余量充足，暂仅观察',
+    historical_expansion_observation:'历史波幅已回落，仍等待稳定证据',
+    high_exit_warmup:'高档退出趋势覆盖尚未完成',
+    high_exit_observation:'高档退出安全证据取样中', high_exit_ready:'高档退出观察已满足',
+    high_exit_margin:'距危急线的原始预测余量不足', high_exit_trend:'高档退出趋势超界',
+    high_exit_warming_budget:'高档退出链温升额度已耗尽', high_exit_recent_jump:'新跳温待重新取证',
+    high_exit_source:'高档退出来源证据不完整', high_exit_context:'高档退出工况不可比',
+    high_exit_endpoint:'高档退出端点未确认', high_exit_power:'功率保护阻止高档退出',
+    high_exit_restoration:'高档试降后实测触发精确恢复',
+    high_exit_forecast_restoration:'高档试降后预测风险触发预防恢复',
+    high_exit_timeout:'高档退出原执行期限已到',
+    ceiling_exit_pending:'80°C门槛退出等待本步读回',
+    ceiling_exit_ready:'80°C门槛相邻退出已具备条件',
+    ceiling_exit_source:'来源不完整或已过期，暂停门槛退出',
+    ceiling_exit_endpoint:'等待真实正转速高档端点',
+    ceiling_exit_motor_wait:'等待电机降档间隔',
+    ceiling_exit_memory:'当前退出意图等待可靠保存',
+    ceiling_exit_timeout:'门槛退出原执行截止已到',
+    ceiling_safety_conflict:'门槛退出与已证实的保护限制冲突',
+    ceiling_exit_execution_timeout:'本步原执行截止已到，等待读回协调',
+    ceiling_exit_timeout_reconciliation:'执行超时后等待新的物理核验',
+    ceiling_exit_fresh_endpoint:'等待新鲜正转速端点',
+    ceiling_exit_endpoint_protection:'设备反馈保护阻止普通退出',
+    ceiling_exit_endpoint_reconciliation:'实际端点尚未核实',
+    ceiling_exit_endpoint_changed:'实际端点改变，本步重新核实',
+    ceiling_exit_identity_changed:'设备身份改变，撤销旧执行归因',
+    ceiling_exit_revoked_inflight:'权限已撤销，等待在途动作读回',
+    ceiling_exit_source_fault:'温度来源异常，核验独立保护',
+    source_fault_protection:'当前温度来源故障保护',
+    failed_descent_restoration:'真实降档热失败，恢复精确安全端点',
+    ceiling_exit_measured80:'实温达到80°C，重新评估普通增强需求',
+    ceiling_exit_source_evidence:'退出所需完整来源证据不足',
+    ceiling_exit_memory_conflict:'热记忆证据冲突，暂停普通退出',
+    ceiling_exit_failed_descent_restoration:'真实降档失败，核验精确恢复',
+    ceiling_exit_complete:'已读回普通门槛退出的目的端点',
+    ceiling_exit_current_rapid_risk:'同一来源接近危急线且快速升温，短时暂停普通退出',
+    ceiling_exit_hardware_alarm:'硬件告警，暂停退出并核验保护',
+    ceiling_exit_unresolved_execution:'先核实未决物理动作',
+    ceiling_exit_safety_conflict:'历史失败限制阻止本步退出，等待符合条件的重新核验',
+    ceiling_exit_requalifying:'历史失败限制保留，重新核验本步退出',
+    ceiling_requalification_collecting:'正在采集本端点完整60秒温度窗口',
+    ceiling_requalification_material_recovery:'失败来源的负载或功率尚未满足改善条件',
+    ceiling_requalification_context_changed:'工况范围或空闲状态改变，重新取证',
+    ceiling_requalification_fresh_evidence:'等待完整新鲜的温度、身份及风机证据',
+    ceiling_requalification_advancing_evidence:'等待温度来源和真实风机读回共同推进',
+    ceiling_requalification_persistent_heat:'持续升温证据尚未解除，暂停本步退出',
+    ceiling_requalification_temperature_window:'温度波幅或趋势未通过完整60秒核验',
+    ceiling_requalification_temperature_slope:'完整60秒温度趋势仍超出退出范围',
+    ceiling_requalification_temperature_range:'完整60秒温度波幅超过2°C',
+    ceiling_requalification_temperature_median:'末段温度中位数较首段上升超过0.3°C',
+    ceiling_requalification_ready:'本步重新取证合格，仍须核验电机和持久意图',
+    ceiling_exit_motor_budget:'电机预算限制，暂停本步退出',
+    ceiling_exit_motor_interval:'等待电机降档间隔',
+    ceiling_exit_advancing_endpoint:'等待新的端点反馈',
+    growing_return_cycles:'重复波动幅度仍在增加',
+    returned_cycle_observation:'处于既有波动范围，尚未满足执行条件',
+    returned_cycle_bound:'已回落的周期波动，仍按单步条件评估',
+    bounded_deceleration:'小幅回温已减缓且预测余量充足',
+    raw_projection_margin:'原始预测余量不足',
+    persistent_heat:'持续升温尚未证明风险有界',
+    coverage_or_genuine_rise:'覆盖不足或升温风险未解除',
+    expanding_return_range:'波动范围扩大，尚未证明回落',
+    drift_rate_or_projected_margin:'回温速率或预测余量未满足下降条件',
+    new_workload:'新负载周期', pending_intent:'当前下降意图待确认', incomplete_safe_evidence:'安全证据不完整',
+    insufficient_margin:'预测余量不足', safe_observation:'安全证据取样中', storage_hold:'存储暂停', protection:'保护状态',
+    complete_safe_observation:'完成本档安全观察', fresh_safe_temperature:'取得新鲜安全温度',
+    safe_endpoint_readback:'确认原安全端点的真实读回', verify_restrictive_memory:'核实持久限制和未完成下降',
+    same_source_ready:'等待约束来源恢复可执行资格；不只等待计时结束',
+    lower_same_host_workload_60s:'失败来源负载及功率改善后取证60秒',
+    safe_comparable_plateau_180s:'同档可比安全新平衡180秒', comparable_safe_workload_60s:'可比安全负载60秒',
+    persisted_snapshot_and_readback:'当前快照可靠保存并确认真实目的档',
+    fresh_complete_safe_evidence:'重新取得完整新鲜安全证据', safe_projected_margin:'同源预测余量满足要求',
+    high_exit_complete_trend_60s:'先取得本档完整60秒趋势',
+    high_exit_complete_observation_180s:'完成本档180秒合格退出观察',
+    high_exit_safe_critical_margin:'逐来源距75°C危急线的预测余量至少5°C',
+    high_exit_comparable_context:'重新取得同源可比工况',
+    high_exit_fresh_endpoint:'取得新鲜正转速端点',
+    reliable_storage_and_fresh_evidence:'存储恢复且安全证据新鲜'};
+  const label = value => labels[value] || value || '未知';
+  return ` 闭环状态 ${label(status.phase)} · ${label(status.primary_reason)}。`
+    + (status.release_basis === 'high_exit' ? ' 高档逐级退出，每次仅下降一档，至少到10档后再按普通规则寻找更低档位。' : '')
+    + (status.release_basis === 'ceiling80' && !decision?.high_wind?.exception ? ' 低于80°C的普通增强权限已撤销，按真实电机约束逐档退出至10档。此过程不积累普通试降信用。' : '')
+    + (status.primary_reason === 'ceiling_exit_requalifying' ? ' 观察时长达到60秒仍须温度趋势、波幅和可比工况全部合格，计时结束不等于获准降档。' : '')
+    + (source ? ` 约束来源 ${String(source).slice(0, 240)}。` : '')
+    + (Number.isFinite(status.margin_c) ? ` ${status.margin_reference === 'critical75'
+      ? '距75°C危急线的预测余量' : '同源预测余量'} ${numeric(status.margin_c)}°C。` : '')
+    + (status.release_basis === 'high_exit' && Number.isFinite(status.measured_margin_c)
+      ? ` 实温余量 ${numeric(status.measured_margin_c)}°C。` : '')
+    + (status.release_basis === 'high_exit' && Number.isFinite(status.trend_rate_c_per_second)
+      ? ` 趋势 ${numeric(status.trend_rate_c_per_second, 3)}°C/s。` : '')
+    + (status.release_basis === 'high_exit' && Number.isFinite(status.chain_warming_c)
+        && Number.isFinite(status.warming_budget_c)
+      ? ` 退出链累计温升 ${numeric(status.chain_warming_c)} / ${numeric(status.warming_budget_c)}°C。` : '')
+    + (Number.isFinite(status.observe_seconds) && Number.isFinite(status.required_seconds)
+      ? ` 合格观察 ${numeric(status.observe_seconds, 0)} / ${numeric(status.required_seconds, 0)} 秒。` : '')
+    + (status.next_condition ? ` 下一步条件 ${String(label(status.next_condition)).slice(0, 300)}。` : '')
+    + (status.workload_phase ? ` 负载阶段 ${label(status.workload_phase)}。` : '')
+    + (status.release_basis === 'high_exit' && status.ordinary_reason
+      ? ` 普通低档搜索仍受 ${String(label(status.ordinary_reason)).slice(0, 160)} 约束，不借用退出观察。` : '')
+    + (includeMemory && decision.thermal_memory ? memoryDetails(decision.thermal_memory) : '');
+}
+
 function renderHistory(data) {
   const samples = data.samples || [];
   $('history-count').textContent = `显示 ${samples.length} 条，按日志写入顺序倒序，最多 200 条。`
     + (data.samples_truncated ? '所选范围还有更早记录，表格已截断；选择更早的结束时间可继续查看。' : '所选范围内未截断。');
   $('history-samples').innerHTML = samples.map(sample => {
     const fan = sample.fan || {};
+    const readback = fanReadback(fan, sample.snapshot_at, sample.requested_level);
     const manual = sample.control?.manual_level;
-    const mode = manual === null ? '自动' : Number.isInteger(manual) && manual >= 0 && manual <= 16 ? `手动 ${manual} 档` : '未知（旧记录未记录）';
+    const mode = manual === null ? '软件自动温控' : Number.isInteger(manual) && manual >= 0 && manual <= 16 ? `手动最低档 ${manual} 档` : '未知（旧记录未记录）';
     const nodes = hosts.map(host => {
       const node = sample.nodes?.find(item => item.host === host);
       if (!node) return '<td>节点记录缺失</td>';
@@ -249,7 +413,7 @@ function renderHistory(data) {
       return `<td>${numeric(node.cpu_temp)} / ${numeric(node.gpu_temp)} / ${numeric(node.board_temp)} °C<small>${state}</small><small>采样 ${escape(historyTime(node.sampled_at))}</small><small>${numeric(node.power_w)} W · ${escape(powerLabel(node))}</small></td>`;
     }).join('');
     const policies = Object.entries(sample.active_power_policy || {}).map(([host, policy]) => `${host} 整机 ${numeric(policy.threshold_w, 0)} W · ${policy.source} · 发布版本 ${policy.version}`).join('；');
-    return `<tr><td>${escape(historyTime(sample.ts))}<small>快照 ${escape(historyTime(sample.snapshot_at))}</small></td><td>${mode}</td><td>${numeric(sample.requested_level, 0)}</td><td>${numeric(fan.level, 0)} 档<small>${escape(historyReadback(sample))}</small><small>${escape(fan.power ?? '电源未知')} / ${escape(fan.mode ?? '模式未知')}</small><small>${escape(fan.error || '')}</small><small>${escape(ambientReadback(fan, sample.snapshot_at))}</small></td><td>${numeric(fan.rpm, 0)} RPM</td><td>${escape(historyTime(fan.verified_at))}</td>${nodes}<td>${(sample.decision?.reasons || []).map(escape).join('<br>') || '未记录原因'}<small>当前场景：${escape(sample.decision?.scenario_detail || sample.decision?.scenario || '旧记录未标注场景')}</small>${trialDetails(sample.decision) ? `<small>${escape(trialDetails(sample.decision))}</small>` : ''}<small>${escape(policies || '固定保护；未记录生效学习参数')}</small></td></tr>`;
+    return `<tr><td>${escape(historyTime(sample.ts))}<small>快照 ${escape(historyTime(sample.snapshot_at))}</small></td><td>${mode}</td><td>${numeric(sample.requested_level, 0)}</td><td>${readback.actual !== null ? `${readback.actual} 档` : '实际档位未知'}<small>${escape(historyReadback(readback))}</small><small>${escape(fanSetting(fan))}</small><small>${escape(fan.error || '')}</small><small>${escape(ambientReadback(fan, sample.snapshot_at))}</small></td><td>${numeric(fan.rpm, 0)} RPM</td><td>${escape(historyTime(fan.verified_at))}</td>${nodes}<td>${(sample.decision?.reasons || []).map(escape).join('<br>') || '未记录原因'}<small>当前场景：${escape(sample.decision?.scenario_detail || sample.decision?.scenario || '旧记录未标注场景')}</small><small>${escape(highWindDetails(sample.decision))}</small><small>${escape(controlDetails(sample.decision))}</small>${trialDetails(sample.decision) ? `<small>${escape(trialDetails(sample.decision))}</small>` : ''}<small>${escape(policies || '固定保护；未记录生效学习参数')}</small></td></tr>`;
   }).join('') || '<tr><td colspan="11">所选保留时段没有记录。容量或保留时间可能已清理更早数据。</td></tr>';
   $('history-note').textContent = `${historyTime(data.from)} 至 ${historyTime(data.to)}。曲线为时间桶最高温，表格为原始快照。容量和保留时间可能缩短范围。`;
 }

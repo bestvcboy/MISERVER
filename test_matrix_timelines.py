@@ -314,16 +314,16 @@ class MatrixTimelineTests(unittest.TestCase):
         decision = self.step(controller, start + 6, 14, cpu=73, manual=14)
         self.assertEqual(decision['level'], 16)
 
-    def test_source_wall_age_uses_sample_wall_plus_monotonic_elapsed(self):
-        for age, expected in ((6, 16), (6.000001, 16), (-2, 16), (-2.000001, 16), (900, 16)):
+    def test_source_wall_age_spends_clock_budget_and_monotonic_elapsed(self):
+        for age, fault in ((-.5, False), (-.500001, True), (5.499999, False),
+                           (5.5, True), (6, True), (6.000001, True), (-2, True), (900, True)):
             controller = Controller(HOSTS)
             nodes = fleet(0, cpu=42)
             for sample in nodes:
                 sample.update(sampled_at=10000, source_ts=10000 - age)
             decision = controller.decide(nodes, 0, minimum_level=0, feedback=feedback(0, 16))
-            self.assertEqual(decision['level'], expected)
-            self.assertEqual(any('来源温度时间' in reason for reason in decision['reasons']),
-                             age > 6 or age < -2)
+            self.assertEqual(decision['level'], 16)
+            self.assertEqual(any('来源时间无效、过期' in reason for reason in decision['reasons']), fault)
         controller, actual = Controller(HOSTS), 16
         for now in range(0, 64, 3):
             nodes = fleet(now, cpu=42)
@@ -332,14 +332,15 @@ class MatrixTimelineTests(unittest.TestCase):
             decision = controller.decide(nodes, now, minimum_level=0, feedback=feedback(now, actual))
             self.assertEqual(decision['level'], 16)
             actual = decision['level']
-        self.assertIn('age=900s', ' '.join(decision['reasons']))
-        for source_age in (3, 3.000001):
+        self.assertTrue(all(node['sampled_at'] - node['source_ts'] == 900 for node in nodes))
+        self.assertIn('来源时间无效、过期', ' '.join(decision['reasons']))
+        for source_age in (2.499999, 2.5, 3, 3.000001):
             controller = Controller(HOSTS)
             nodes = fleet(100, cpu=42)
             for sample in nodes:
                 sample.update(sampled_at=1000000000, source_ts=1000000000 - source_age)
             decision = controller.decide(nodes, 103, minimum_level=0, feedback=feedback(103, 16))
-            self.assertEqual(any('来源温度时间' in reason for reason in decision['reasons']), source_age > 3)
+            self.assertEqual(any('来源时间无效、过期' in reason for reason in decision['reasons']), source_age >= 2.5)
 
     def test_old_step_cannot_amplify_current_rise_but_fast_projection_protects(self):
         for field in ('cpu', 'gpu', 'board'):

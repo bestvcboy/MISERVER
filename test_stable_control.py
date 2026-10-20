@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 import service
-from core import Controller
+from core import Controller, SourceFault, SourceFaultProtection
 from test_core import HOSTS
 from test_scenarios import fleet, feedback
 from test_service import FakeFan
@@ -80,9 +80,22 @@ class StableControlTests(unittest.TestCase):
         nodes = fleet(0, cpu=75)
         nodes[1].update(online=False, failure_kind="transport", sensors=[])
         decision = controller.decide(nodes, 0, minimum_level=0, feedback=feedback(0, 2))
-        self.assertEqual(decision['level'], 10)
-        self.assertEqual(controller.motion.actual_c, 75)
-        self.assertIsNotNone(controller.motion.source)
+        self.assertEqual((decision['level'], decision['normal_ceiling']), (4, 10))
+        view = controller.thermal_view
+        self.assertEqual(view.maximum_c, 75)
+        self.assertFalse(view.complete)
+        self.assertEqual({source[0] for source, temp, stamp in view.observations
+            if source[3:] == ('acpi:0:acpitz', 'acpi') and temp == 75 and stamp == -.5},
+            set(HOSTS) - {HOSTS[1]})
+        proof = controller.high_wind.proof
+        self.assertIsInstance(proof, SourceFaultProtection)
+        self.assertEqual((proof.source[0], proof.fault, proof.generation),
+            (HOSTS[1], SourceFault.MISSING, view.generation))
+        self.assertIn((proof.source, SourceFault.MISSING, 0), view.faults)
+        self.assertEqual(decision['high_wind']['exception'], 'SourceFaultProtection')
+        self.assertIsNone(controller.high_wind.actual_c)
+        self.assertEqual((decision['execution_trial']['from'], decision['execution_trial']['to'],
+            decision['execution_trial']['status']), (2, 4, 'pending'))
 
     def test_coupled_transport_retains_anchor_and_unknown_actual(self):
         controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
@@ -92,12 +105,18 @@ class StableControlTests(unittest.TestCase):
         for now in (57, 60):
             nodes = fleet(now, cpu=49, gpu=47, board=54, power=60, load=5)
             nodes[1].update(online=False, failure_kind='transport', sensors=[])
-            decision = controller.decide(nodes, now, minimum_level=0,
-                feedback=feedback(now, None, confirmed=False, execution='pending', rpm=None,
-                    readback_hold=dict(level=7, until=69, failures=1)))
+            readback = feedback(now, None, confirmed=False, execution='pending', rpm=None,
+                readback_hold=dict(level=7, until=69, failures=1))
+            decision = controller.decide(nodes, now, minimum_level=0, feedback=readback)
             self.assertEqual(decision['level'], 7)
             self.assertEqual(controller._policy['fan_transport_safe'], anchor)
-            self.assertEqual(decision['scenario'], 'communication_hold')
+            self.assertEqual(decision['scenario'], 'ceiling_exit_fresh_endpoint')
+            self.assertEqual(decision['control_status']['primary_reason'], 'ceiling_exit_fresh_endpoint')
+            self.assertIsNone(decision['actual_level'])
+            self.assertIsNone(decision['control_status']['actual_level'])
+            self.assertEqual((readback['level'], readback['confirmed'], readback['rpm'],
+                readback['execution']), (None, False, None, 'pending'))
+            self.assertIsNone(decision['execution_trial'])
         self.assertTrue(controller.communication_safe(84))
         self.assertFalse(controller.communication_safe(84.001))
 
@@ -209,8 +228,8 @@ class HeadroomReleaseTests(unittest.TestCase):
             actual = decision['level']
         self.assertEqual(edges[:2], [(210, 10, 9), (393, 9, 8)])
 
-    def test_exact_eight_allows_drift_but_below_eight_vetoes(self):
-        for board, expected in ((57, [(210, 10, 9)]), (57.001, [])):
+    def test_unrelated_stationary_board_margin_does_not_veto_cold_cpu_drift(self):
+        for board, expected in ((57, [(210, 10, 9)]), (57.001, [(210, 10, 9)])):
             with self.subTest(board=board):
                 controller = Controller(HOSTS, rules_only=True, high_wind_gate=True)
                 actual = 10

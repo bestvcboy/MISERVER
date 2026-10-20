@@ -1,6 +1,8 @@
 POSIX_SKIPS = {'test_startup_evidence.EvidenceTests.test_unsupported_windows_private_creation_is_explicit_refusal'}
 
 WINDOWS_SKIPS = {
+    'test_legacy_motor_budget.LegacyMotorBudgetTests.test_native_links_ownership_and_real_directory_sync',
+    'test_policy_memory.ThermalMemoryStoreTests.test_native_store_permissions_sync_and_link_rejection',
     'test_rule_mode.LearningArchiveTests.test_archive_rejects_symlinks_and_wrong_owner',
     'test_controller.NativeControllerTests.test_preflight_preserves_faulted_budget_and_refuses_wrong_admission',
     'test_controller.NativeControllerTests.test_actual_child_timeout_kills_reaps_and_preserves_evidence',

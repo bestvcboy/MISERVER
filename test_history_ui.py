@@ -9,6 +9,23 @@ from core import Journal
 
 
 class HistoryUITests(unittest.TestCase):
+    def test_high_wind_history_is_bounded_and_legacy_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = Journal(root)
+            journal.append(dict(ts=100, decision=dict(high_wind=dict(reason='empirical',
+                detail='e' * 400, source=['host', 'DGX', 'cpu'], actual_c=65, working_c=60,
+                observation_seconds=180, window_seconds=180, episode_deadline=700,
+                ceiling=11, prediction='unavailable', token='private'))))
+            journal.append(dict(ts=103, decision=dict(level=10)))
+            samples = journal.history(0, 104)['samples']
+            self.assertNotIn('high_wind', samples[0]['decision'])
+            high = samples[1]['decision']['high_wind']
+            self.assertEqual(high['reason'], 'empirical')
+            self.assertEqual(high['detail'], 'e' * 240)
+            self.assertEqual((high['working_c'], high['window_seconds'], high['ceiling']), (60, 180, 11))
+            self.assertEqual(high['source'], ['host', 'DGX', 'cpu'])
+            self.assertNotIn('private', json.dumps(samples))
+
     def test_history_verification_fields_are_additive_whitelisted_and_legacy_safe(self):
         with tempfile.TemporaryDirectory() as root:
             journal = Journal(root)
@@ -45,20 +62,39 @@ class HistoryUITests(unittest.TestCase):
             journal.append(dict(ts=102.5, decision=dict(trend_complete=incomplete)))
             self.assertEqual(journal.history(0, 103)['samples'][0]['decision']['trend_complete'], incomplete)
 
-    def test_static_policy_matches_controller_fourteen(self):
+    def test_static_policy_defers_parameters_to_server_and_keeps_boundaries(self):
         root = Path(__file__).parent
         html = (root / 'ui.html').read_text(encoding='utf-8')
-        for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', 'CPU / GPU <b>60°C</b>'):
+        for retired in ('CPU / GPU 58°C', '绝对硬线为 60°C / 75°C', '实温至少 80°C',
+                        '增强周期固定600秒', '撤权不强制降至10档', '才申请11档'):
             self.assertNotIn(retired, html)
         self.assertNotIn('70°C', html)
-        for policy in ('普通上调每次最多两档', '可信传感器当前实温至少 80°C',
-                       '平台或降温但仍达 80°C', '不足 80°C 仍封顶 10 档',
-                       '75°C 硬线', '73°C 预缓冲', '自动试降每次最多 1 档',
-                       '每次自动试降前至少积累 180 秒合格观察',
-                       '不因恢复档吹凉或时间经过而清除失败档记忆', '不计容量学习'):
+        for policy in ('等待服务返回当前策略规格', '负载预备结束后可重新评估更低档',
+                       '存储失败不授予额外高风权限', '预测担忧与真实热失败分开处理',
+                       '自动下降每次一档', '至少180秒完整安全观察',
+                       '失败下降只能精确恢复先前安全端点',
+                       '可信实温达到80°C才允许普通需求超过10档',
+                       '低于80°C时普通需求最多10档',
+                       '按电机约束逐档退出至10档', '独立故障证据'):
             self.assertIn(policy, html)
         for retired in ('观察 30 秒最多降 3 档', '8–10°C 最多降 2 档', '初次低温观察 30 秒可跳降'):
             self.assertNotIn(retired, html)
+
+    def test_history_memory_projection_is_bounded_and_keeps_unknowns(self):
+        with tempfile.TemporaryDirectory() as root:
+            journal = Journal(root)
+            journal.append(dict(ts=100, nodes=[], decision=dict(
+                thermal_memory=dict(state='failed', descent_allowed=False, token='private'),
+                policy_spec=dict(version='closed-loop-r1', private='private'))))
+            journal.append(dict(ts=103, nodes=[], decision=dict(
+                thermal_memory=dict(state='unrecognized', descent_allowed='yes'),
+                policy_spec=dict(version='v' * 100))))
+            samples = journal.history(0, 104)['samples']
+            self.assertEqual(samples[0]['decision']['thermal_memory'], dict(state='unknown', descent_allowed=None))
+            self.assertEqual(samples[1]['decision']['thermal_memory'], dict(state='failed', descent_allowed=False))
+            self.assertEqual(samples[0]['decision']['policy_version'], 'v' * 80)
+            self.assertEqual(samples[1]['decision']['policy_version'], 'closed-loop-r1')
+            self.assertNotIn('private', json.dumps(samples))
 
     def test_ambient_history_projects_public_fields_and_preserves_raw_monotonic(self):
         with tempfile.TemporaryDirectory() as root:
@@ -99,32 +135,44 @@ vm.createContext(context);
 const source = fs.readFileSync('ui.js', 'utf8');
 vm.runInContext(source.slice(0, source.lastIndexOf('refresh(); history();')), context);
 const evaluate = code => vm.runInContext(code, context);
+context.requalifying = {control_status:{phase:'hold', primary_reason:'ceiling_exit_requalifying',
+  release_basis:'ceiling80', observe_seconds:27, required_seconds:60}, high_wind:{exception:null}};
+const qualificationText = evaluate('controlDetails(requalifying, false)');
+assert.match(qualificationText, /历史失败限制保留.*重新核验本步退出/);
+assert.match(qualificationText, /27 \/ 60 秒/);
+assert.ok(!qualificationText.includes('已确认降档'));
 assert.match(html, /value="168">最近 7 天/);
 assert.match(html, /id="retention"[^>]+value="7"/);
 assert.match(html, /id="capacity"[^>]+value="4096"/);
 assert.ok(html.includes('当前暂停机器学习，已有学习参数不参与控制。按固定阈值、温度趋势与实际风力反馈自动控制。'));
-assert.ok(html.includes('功耗达到 80 W 暂停下降'));
+assert.ok(html.includes('负载预备结束后可重新评估更低档'));
 assert.ok(!html.includes('负载 30%'));
 const safetyText = '有效请求包含温度与通信保护。保存设置后仍须等待受限执行和设备读回。';
+const manualText = ' 所选最低档 8 档是手动设置，温度与通信保护可提高需求，高风门控可限制有效请求；不保证固定在所选档位。';
 context.status = {controller_age_seconds:0, server_time:102, updated_at:102,
   settings:{manual_level:8, retention_days:7, max_log_mb:4096}, requested_level:16,
   fan:{configured:true, confirmed:false, level:8, rpm:800, power:'on', mode:'favorite', verified_at:101, execution:'pending'},
   decision:{scenario:'future_scenario', scenario_detail:'观察 <img src=x onerror="bad()"> & \'回温\'', learning_eligible:false},
   nodes:[], log_bytes:0, dropped_records:0};
 evaluate('render(status)');
-assert.equal(get('policy-detail').textContent, '当前场景：观察 <img src=x onerror="bad()"> & \'回温\'。' + safetyText);
+assert.equal(get('policy-detail').textContent, '当前场景：观察 <img src=x onerror="bad()"> & \'回温\'。' + safetyText + manualText);
 assert.equal(get('policy-detail').innerHTML, '');
 Object.assign(context.status, {high_wind_gate:true, high_wind_limit:16});
 evaluate('render(status)');
-assert.match(get('policy-detail').textContent, /当前可信实温至少80°C/);
+assert.match(get('policy-detail').textContent, /高风证据未知/);
 assert.ok(!get('policy-detail').textContent.includes('70°C'));
 context.status.high_wind_limit = 10;
 evaluate('render(status)');
-assert.match(get('policy-detail').textContent, /请求不超过10档.*实际档位以受限执行和转速读回为准/);
+assert.match(get('policy-detail').textContent, /当前可写上限 10 档.*实际档位以受限执行和转速读回为准/);
+context.status.decision.high_wind = {reason:'empirical', detail:'proof <img src=x onerror="bad()">', source:['host','DGX','cpu'], actual_c:65, observation_seconds:180};
+evaluate('render(status)');
+assert.match(get('policy-detail').textContent, /有界实测增强.*proof <img/);
+assert.equal(get('policy-detail').innerHTML, '');
+delete context.status.decision.high_wind;
 delete context.status.high_wind_gate;
 delete context.status.high_wind_limit;
 evaluate('render(status)');
-assert.equal(get('policy').textContent, '已保存 · 手动 8 档');
+assert.equal(get('policy').textContent, '已保存 · 手动最低档 8 档');
 assert.equal(get('desired').textContent, 16);
 assert.equal(get('actual').textContent, '8 档');
 assert.equal(get('execution').textContent, '最新请求待执行');
@@ -221,11 +269,11 @@ for (const value of [undefined, null, NaN, Infinity, true, '30.8']) {
 for (const detail of [undefined, null, '']) {
   context.status.decision.scenario_detail = detail;
   evaluate('render(status)');
-  assert.equal(get('policy-detail').textContent, '当前场景：旧记录未标注场景。' + safetyText);
+  assert.equal(get('policy-detail').textContent, '当前场景：旧记录未标注场景。' + safetyText + manualText);
 }
 context.status.decision = {};
 evaluate('render(status)');
-assert.equal(get('policy-detail').textContent, '当前场景：旧记录未标注场景。' + safetyText);
+assert.equal(get('policy-detail').textContent, '当前场景：旧记录未标注场景。' + safetyText + manualText);
 context.learning = {published:{'192.168.3.180':{threshold_w:75, source:'spbm', version:1, generated_at:21600}},
   active:{'192.168.3.180':{}}, eligibility:{phase:'blocked', reason:'load'}, next_at:43200,
   candidate:{generated_at:21600, window_from:0, window_to:21600, hosts:{'192.168.3.180':{
@@ -263,7 +311,7 @@ context.sample = sample;
 context.payload = {rows:[], samples:[sample], samples_truncated:false, from:0, to:103};
 const render = () => evaluate('renderHistory(payload)');
 render();
-assert.match(get('history-samples').innerHTML, /<td>自动<\/td><td>0<\/td><td>0 档/);
+assert.match(get('history-samples').innerHTML, /<td>软件自动温控<\/td><td>0<\/td><td>0 档/);
 assert.match(get('history-samples').innerHTML, /记录时实际匹配/);
 assert.match(get('history-samples').innerHTML, /距快照 1.0 秒/);
 assert.match(get('history-samples').innerHTML, /0.0 \/ — \/ 52.0 °C/);
@@ -367,10 +415,10 @@ assert.match(get('history-samples').innerHTML, /读回时效未知/);
 assert.match(get('history-samples').innerHTML, /采样时效未知/);
 delete sample.fan;
 render();
-assert.match(get('history-samples').innerHTML, /<td>0<\/td><td>— 档/);
+assert.match(get('history-samples').innerHTML, /<td>0<\/td><td>实际档位未知/);
 sample.control = {manual_level:0};
 render();
-assert.match(get('history-samples').innerHTML, /手动 0 档/);
+assert.match(get('history-samples').innerHTML, /手动最低档 0 档/);
 context.payload.samples = Array.from({length:200}, ()=>sample);
 context.payload.samples_truncated = true;
 render();

@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import errno
+import hashlib
 import ipaddress
 import json
 import logging
@@ -11,10 +12,13 @@ import socket
 import ssl
 import stat
 import tempfile
+import threading
 import time
+from collections import deque
+from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,8 +28,11 @@ from miio import AirPurifier
 from miio.exceptions import DeviceException
 from miio.integrations.airpurifier.zhimi.airpurifier import OperationMode
 
-from core import Controller, HighWindAuthority, MotionAuthority, HistoryLimit, Journal, MAX_LEVEL, HIGH_WIND_TTL, normalize
+from core import (Controller, HighWindAuthority, MotionAuthority, NoAscent, Measured80,
+    SourceFaultProtection, FailedDescentRestoration, HistoryLimit, Journal, MAX_LEVEL, HIGH_WIND_TTL, ThermalView, normalize)
 from learning import BUCKET, Learning, WINDOW, checkpoint_limit, context_of
+from policy_memory import ThermalMemoryGate, ThermalMemoryStore, memory_digest
+from thermal_policy import source_timing
 from qr_connector import BIND_CONSENT, START_CONSENT, QRError, QRConnector, strict_json
 
 HOSTS = tuple(f"192.168.3.{n}" for n in (180, 181, 183, 184))
@@ -36,7 +43,7 @@ MOTOR_IDENTITY = {"ip": DEVICE_IP, "model": DEVICE_MODEL, "did": DEVICE_ID, "mac
 logging.getLogger("miio").setLevel(100)
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, *, before_replace=None):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
@@ -46,6 +53,8 @@ def atomic_write(path, text):
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
     finally:
         if temporary is not None and temporary.exists():
@@ -128,14 +137,17 @@ class StorageHealth:
     first_success: float | None = None
     recovery_successes: int = 0
     last_error: dict | None = None
+    recovery_revision: int | None = None
+    failure_epoch: int = 0
 
-    def refresh(self, now, *, eligible):
-        if self.phase == "holding" and (not eligible or now - self.first_failure >= 9
+    def refresh(self, now, *, hold_eligible):
+        if self.phase == "holding" and (not hold_eligible or now - self.first_failure >= 9
                                         or self.consecutive_failures >= 3):
             self.phase = "protect"
         return self.phase
 
-    def failure(self, now, wall, error, write_phase, committed, *, eligible):
+    def failure(self, now, wall, error, write_phase, committed, *, hold_eligible):
+        self.failure_epoch += 1
         transient = isinstance(error, TimeoutError) or isinstance(error, OSError) and error.errno in (
             errno.EAGAIN, errno.EBUSY, errno.EINTR, errno.ETIMEDOUT)
         if self.phase == "healthy":
@@ -145,35 +157,55 @@ class StorageHealth:
         self.consecutive_failures += 1
         self.first_success = None
         self.recovery_successes = 0
+        self.recovery_revision = None
         category = type(error).__name__ if type(error).__module__ == "builtins" else "OtherError"
         self.last_error = dict(category=category, errno=error.errno if isinstance(error, OSError) else None,
                                write_phase=write_phase, committed=committed, mono=now, wall=wall)
         if not transient or committed is not False or write_phase not in ("prepare", "prune"):
             self.phase = "protect"
-        return self.refresh(now, eligible=eligible)
+        return self.refresh(now, hold_eligible=hold_eligible)
 
-    def success(self, now, *, eligible):
-        self.refresh(now, eligible=eligible)
+    def success(self, now, *, hold_eligible, verified_revision):
+        self.refresh(now, hold_eligible=hold_eligible)
         if self.phase == "healthy":
             return
         self.consecutive_failures = 0
-        if not eligible:
+        if verified_revision is None:
             self.first_success = None
             self.recovery_successes = 0
+            self.recovery_revision = None
             return
+        if self.recovery_revision != verified_revision:
+            self.first_success = None
+            self.recovery_successes = 0
+            self.recovery_revision = verified_revision
         if self.first_success is None:
             self.first_success = now
             self.recovery_successes = 1
         elif now - self.first_success >= 3:
-            self.recovery_successes += 1
+            self.recovery_successes = 2
             self.phase = "healthy"
             self.first_failure = None
             self.first_success = None
+            self.recovery_revision = None
 
     def status(self):
         return dict(phase=self.phase, first_failure_mono=self.first_failure,
                     consecutive_failures=self.consecutive_failures,
                     recovery_successes=self.recovery_successes, last_error=self.last_error)
+
+
+@dataclass
+class LegacyBudget:
+    raw: bytes
+    metadata: dict
+    sha256: str
+    exhausted: bool
+
+
+def budget_metadata(info):
+    return {key: getattr(info, key) for key in ('st_dev', 'st_ino', 'st_mode', 'st_nlink',
+        'st_uid', 'st_gid', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
 
 
 @dataclass
@@ -186,24 +218,163 @@ class MotorSchedule:
     fault: bool = False
     budget_path: Path = field(default=None, repr=False)
     persistence_error: str = ""
+    schema_version: int = 2
+    legacy: LegacyBudget | None = field(default=None, repr=False)
+
+    @property
+    def legacy_pending(self):
+        return self.legacy is not None and self.legacy.exhausted
+
+    def _validate_legacy_source(self):
+        source = self.legacy
+        if source is None:
+            return
+        before = self.budget_path.lstat()
+        if (budget_metadata(before) != source.metadata or not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1 or before.st_mode & 0o022
+                or hasattr(os, 'getuid') and before.st_uid != os.getuid()):
+            raise ValueError('legacy source changed')
+        descriptor = os.open(self.budget_path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+            | getattr(os, 'O_NONBLOCK', 0))
+        try:
+            if budget_metadata(os.fstat(descriptor)) != source.metadata:
+                raise ValueError('legacy source changed')
+            raw = os.read(descriptor, 4097)
+            if raw != source.raw or budget_metadata(os.fstat(descriptor)) != source.metadata:
+                raise ValueError('legacy source changed')
+        finally:
+            os.close(descriptor)
+        if budget_metadata(self.budget_path.lstat()) != source.metadata:
+            raise ValueError('legacy source changed')
+
+    def _archive_legacy(self):
+        source = self.legacy
+        if source is None:
+            return
+        self._validate_legacy_source()
+        archive = self.budget_path.parent / ('.legacy-budget-' + source.sha256)
+        archive.mkdir(mode=0o700, exist_ok=True)
+        info = archive.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077
+                or hasattr(os, 'getuid') and info.st_uid != os.getuid()):
+            raise ValueError('archive is not private')
+        directory_fd = (os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            if os.name == 'posix' else None)
+        try:
+            self._archive_files(archive, source, info, directory_fd)
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+        self._validate_legacy_source()
+
+    def _archive_files(self, archive, source, info, directory_fd):
+        def directory_unchanged():
+            linked = archive.lstat()
+            if ((linked.st_dev, linked.st_ino, linked.st_mode, linked.st_uid)
+                    != (info.st_dev, info.st_ino, info.st_mode, info.st_uid)):
+                raise ValueError('archive directory changed')
+            if directory_fd is not None:
+                opened = os.fstat(directory_fd)
+                if ((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid)
+                        != (info.st_dev, info.st_ino, info.st_mode, info.st_uid)):
+                    raise ValueError('archive directory changed')
+        directory_unchanged()
+        relative = {'dir_fd': directory_fd} if directory_fd is not None else {}
+        provenance = json.dumps(dict(metadata=source.metadata, sha256=source.sha256), sort_keys=True).encode()
+        for name, raw in (('source.bin', source.raw), ('provenance.json', provenance)):
+            path = archive / name
+            open_path = name if directory_fd is not None else path
+            def linked_metadata():
+                return budget_metadata(os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if directory_fd is not None else path.lstat())
+            directory_unchanged()
+            try:
+                descriptor = os.open(open_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    | getattr(os, 'O_NOFOLLOW', 0), 0o600, **relative)
+            except FileExistsError:
+                descriptor = os.open(open_path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                    | getattr(os, 'O_NONBLOCK', 0), **relative)
+                try:
+                    existing = os.fstat(descriptor)
+                    if (not stat.S_ISREG(existing.st_mode) or existing.st_nlink != 1
+                            or existing.st_mode & 0o077 or existing.st_size != len(raw)
+                            or hasattr(os, 'getuid') and existing.st_uid != os.getuid()
+                            or os.read(descriptor, len(raw) + 1) != raw
+                            or budget_metadata(os.fstat(descriptor)) != budget_metadata(existing)
+                            or linked_metadata() != budget_metadata(existing)):
+                        raise ValueError('archive conflict')
+                    directory_unchanged()
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            else:
+                with os.fdopen(descriptor, 'wb') as stream:
+                    created = os.fstat(stream.fileno())
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                    final = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(final.st_mode) or final.st_nlink != 1
+                            or final.st_mode & 0o077 or final.st_size != len(raw)
+                            or hasattr(os, 'getuid') and final.st_uid != os.getuid()
+                            or (created.st_dev, created.st_ino) != (final.st_dev, final.st_ino)
+                            or linked_metadata() != budget_metadata(final)):
+                        raise ValueError('archive changed')
+            directory_unchanged()
+        if directory_fd is not None:
+            os.fsync(directory_fd)
+        else:
+            fsync_directory(archive)
+        fsync_directory(archive.parent)
+        directory_unchanged()
+        self._validate_legacy_source()
+
+    def _retire_legacy(self, qualified):
+        def before_replace():
+            self._validate_legacy_source()
+            if not qualified():
+                raise ValueError('legacy admission changed')
+        try:
+            self._archive_legacy()
+            if not qualified():
+                return False
+            self._validate_legacy_source()
+            atomic_write(self.budget_path, json.dumps(dict(version=2, identity=MOTOR_IDENTITY,
+                attempts=0, expected_level=None, fault=False)), before_replace=before_replace)
+            fsync_directory(self.budget_path.parent)
+        except (OSError, ValueError):
+            self.persistence_error = 'legacy_archive_or_migration_failed'
+            return False
+        self.legacy = None
+        self.schema_version = 2
+        self.attempts, self.expected_level, self.fault = 0, None, False
+        return True
 
     def persist_debt_then_set_budget(self, attempts, expected_level, fault=False):
+        if self.legacy_pending:
+            return False
         try:
             if self.budget_path is not None:
-                durable_debt = {"version": 1, "identity": MOTOR_IDENTITY, "attempts": attempts,
+                self._archive_legacy()
+                self._validate_legacy_source()
+                durable_debt = {"version": 2, "identity": MOTOR_IDENTITY, "attempts": attempts,
                           "expected_level": expected_level, "fault": fault}
                 if attempts == 0 and (self.attempts or self.fault or self.persistence_error):
                     durable_debt.update(attempts=self.attempts, expected_level=self.expected_level,
                                   fault=self.fault or self.attempts >= 2)
                     if self.attempts and durable_debt["expected_level"] is None:
                         durable_debt["expected_level"] = MAX_LEVEL
-                atomic_write(self.budget_path, json.dumps(durable_debt))
+                if self.legacy is not None:
+                    atomic_write(self.budget_path, json.dumps(durable_debt),
+                        before_replace=self._validate_legacy_source)
+                else:
+                    atomic_write(self.budget_path, json.dumps(durable_debt))
                 fsync_directory(self.budget_path.parent)
         except (OSError, ValueError):
             self.attempts = max(self.attempts, attempts)
             self.fault = True
             self.persistence_error = "执行预算未能可靠保存，保持只读；仅当前授权安全上限的有效读回及可靠保存可恢复"
-            if self.budget_path is not None:
+            if self.budget_path is not None and self.legacy is None:
                 # Replacement can succeed before directory sync fails; retain the consumed budget.
                 try:
                     durable_debt.update(attempts=self.attempts, expected_level=self.expected_level if self.attempts else None, fault=True)
@@ -216,6 +387,8 @@ class MotorSchedule:
             return False
         self.attempts, self.expected_level, self.fault = attempts, expected_level, fault
         self.persistence_error = ""
+        self.legacy = None
+        self.schema_version = 2
         return True
 
     @classmethod
@@ -233,7 +406,8 @@ class MotorSchedule:
                 else:
                     raise ValueError
             else:
-                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096 or before.st_mode & 0o022:
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 4096
+                        or before.st_mode & 0o022 or hasattr(os, 'getuid') and before.st_uid != os.getuid()):
                     raise ValueError
                 descriptor = os.open(budget_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
                 try:
@@ -258,7 +432,7 @@ class MotorSchedule:
                     return record
                 record = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)
                 if (not isinstance(record, dict) or set(record) != {"version", "identity", "attempts", "expected_level", "fault"}
-                        or type(record["version"]) is not int or record["version"] != 1 or record["identity"] != MOTOR_IDENTITY
+                        or type(record["version"]) is not int or record["version"] not in (1, 2) or record["identity"] != MOTOR_IDENTITY
                         or type(record["attempts"]) is not int or not 0 <= record["attempts"] <= 2
                         or type(record["fault"]) is not bool
                         or (record["expected_level"] is not None and (type(record["expected_level"]) is not int
@@ -267,6 +441,12 @@ class MotorSchedule:
                     raise ValueError
                 schedule.attempts, schedule.expected_level = record["attempts"], record["expected_level"]
                 schedule.fault = record["fault"] or schedule.attempts == 2
+                schedule.schema_version = record['version']
+                if record['version'] == 1:
+                    schedule.legacy = LegacyBudget(raw, budget_metadata(before), hashlib.sha256(raw).hexdigest(),
+                        schedule.attempts == 2 and record['fault'] is True)
+                    if schedule.legacy_pending:
+                        schedule.fault = False
                 if schedule.fault and schedule.attempts < 2:
                     schedule.persistence_error = "执行预算处于持久只读故障，需当前授权安全上限的有效读回及可靠保存恢复"
         except (OSError, ValueError, UnicodeError, RecursionError):
@@ -357,27 +537,215 @@ class FanRequest:
     limit: int = MAX_LEVEL
     high_wind: HighWindAuthority | None = None
     motion: MotionAuthority | None = None
+    snapshot: object = None
 
 
-def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
+@dataclass(frozen=True)
+class ActuationSnapshot:
+    generation: int
+    settings_revision: int
+    operation: object
+    operation_status: str | None
+    original_deadline: float | None
+    proof: HighWindAuthority | None
+    normal_ceiling: int
+    effective_target: int
+    next_command: int
+    transition_target: int | None
+    endpoint: tuple
+    memory_digest: str | None
+    acknowledged_digest: str | None
+    memory_revision: int
+    storage_state: str
+    budget_identity: tuple
+    blocker: str | None
+    thermal_view: ThermalView | None = None
+
+    @property
+    def needs_durable_intent(self):
+        actual = self.endpoint[2]
+        return (type(actual) is not int or max(actual, self.next_command) > 10
+            or self.next_command < actual)
+
+
+@dataclass(frozen=True)
+class BudgetReservation:
+    attempts: int
+    level: int
+    last_attempt: float
+    snapshot: ActuationSnapshot | None = None
+
+    def owns_second_attempt(self, schedule):
+        return (self.attempts == 2 and schedule.fault and not schedule.persistence_error
+            and (schedule.attempts, schedule.expected_level, schedule.last_attempt)
+                == (self.attempts, self.level, self.last_attempt))
+
+
+@dataclass(frozen=True)
+class Submitted:
+    dispatch_id: int
+
+
+@dataclass(frozen=True)
+class Refused:
+    reason: str
+
+
+@dataclass(frozen=True)
+class SubmissionUncertain:
+    dispatch_id: int
+    reason: str
+
+
+class AdmissionBoundary:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.dispatches = deque(maxlen=64)
+        self.serial = 0
+
+    def retire_legacy(self, schedule, current, direct_read):
+        with self.lock:
+            if (not schedule.legacy_pending or schedule.persistence_error
+                    or time.monotonic() - schedule.last_attempt < 8):
+                return False
+            snapshot = current().snapshot
+            try:
+                actual, stamp, _ = direct_read()
+            except Exception:
+                return False
+            def qualified():
+                fresh = current().snapshot
+                now = time.monotonic()
+                view = snapshot.thermal_view if snapshot is not None else None
+                return (snapshot is not None and fresh == snapshot and not snapshot.blocker
+                    and snapshot.budget_identity == tuple(sorted(MOTOR_IDENTITY.items()))
+                    and snapshot.storage_state == 'healthy'
+                    and isinstance(snapshot.memory_digest, str)
+                    and snapshot.memory_digest == snapshot.acknowledged_digest
+                    and (snapshot.original_deadline is None or now < snapshot.original_deadline)
+                    and actual[:2] == ['on', 'favorite'] and type(actual[2]) is int
+                    and 0 <= actual[2] <= MAX_LEVEL and type(actual[3]) in (int, float)
+                    and math.isfinite(actual[3]) and actual[3] > 0 and 0 <= now - stamp < 6
+                    and isinstance(view, ThermalView) and view.generation == snapshot.generation
+                    and view.complete and not view.faults
+                    and {h for h, _ in view.inventory} == set(HOSTS)
+                    and {key[0] for key, _, _ in view.observations} == set(HOSTS)
+                    and type(view.maximum_c) in (int, float) and math.isfinite(view.maximum_c)
+                    and view.maximum_c < 80 and type(view.expires_mono) in (int, float)
+                    and math.isfinite(view.expires_mono) and now < view.expires_mono
+                    and all(type(temp) in (int, float) and math.isfinite(temp) and temp < 80
+                        and type(observed) in (int, float) and math.isfinite(observed)
+                        and 0 <= now - observed < 6 for _, temp, observed in view.observations))
+            return qualified() and schedule._retire_legacy(qualified)
+
+    @asynccontextmanager
+    async def publication(self):
+        # A canceled async waiter must not strand a lock acquired by its worker.
+        # Handoff (or release on cancellation) occurs on the event loop itself.
+        loop = asyncio.get_running_loop()
+        acquisition = loop.create_future()
+        def handoff():
+            if acquisition.cancelled():
+                self.lock.release()
+            else:
+                acquisition.set_result(True)
+        def acquire():
+            self.lock.acquire()
+            try:
+                loop.call_soon_threadsafe(handoff)
+            except RuntimeError:
+                self.lock.release()
+        worker = loop.run_in_executor(None, acquire)
+        try:
+            await acquisition
+        except asyncio.CancelledError:
+            if acquisition.done() and not acquisition.cancelled():
+                self.lock.release()
+            raise
+        try:
+            yield
+        finally:
+            self.lock.release()
+
+    def submit_guarded(self, command, expected_snapshot, reservation, schedule, current,
+                       validate, sdk_mutation, args, *, high_wind_gate=True):
+        with self.lock:
+            request = current()
+            snapshot = request.snapshot
+            now = time.monotonic()
+            if expected_snapshot is not None and snapshot != expected_snapshot:
+                return Refused('actuation_snapshot_changed')
+            if (schedule.persistence_error or reservation is None
+                    or (schedule.attempts, schedule.expected_level, schedule.last_attempt)
+                        != (reservation.attempts, reservation.level, reservation.last_attempt)):
+                return Refused('durable_motor_reservation_changed')
+            if snapshot is not None:
+                if snapshot.blocker:
+                    return Refused(snapshot.blocker)
+                if (snapshot.original_deadline is not None and now >= snapshot.original_deadline):
+                    return Refused('original_deadline_expired')
+                if snapshot.needs_durable_intent and snapshot.memory_digest != snapshot.acknowledged_digest:
+                    return Refused('current_memory_not_acknowledged')
+            reason = validate(request, command, now)
+            if reason:
+                return Refused(reason)
+            entry_now = time.monotonic()
+            if snapshot is not None and (snapshot.original_deadline is not None
+                    and entry_now >= snapshot.original_deadline):
+                return Refused('original_deadline_expired')
+            if high_wind_gate and snapshot is not None and max(command[1], snapshot.endpoint[2] if type(snapshot.endpoint[2]) is int else 0) > 10:
+                if request.high_wind is None or not request.high_wind.valid_at(entry_now):
+                    return Refused('proof_expired_at_sdk_entry')
+                if (isinstance(request.high_wind.proof, NoAscent)
+                        or snapshot.endpoint[:2] == ('on', 'favorite')):
+                    stamp = snapshot.endpoint[4]
+                    if type(stamp) not in (int, float) or not 0 <= entry_now - stamp < 6:
+                        return Refused('endpoint_expired_at_sdk_entry')
+                    rpm = snapshot.endpoint[3]
+                    if type(rpm) not in (int, float) or not math.isfinite(rpm) or rpm <= 0:
+                        return Refused('running_endpoint_invalid_at_sdk_entry')
+            self.serial += 1
+            dispatch = dict(dispatch_id=self.serial, command=command, snapshot=snapshot,
+                submitted_mono=entry_now, state='submitted')
+            self.dispatches.append(dispatch)
+            try:
+                sdk_mutation(*args)
+            except Exception:
+                dispatch['state'] = 'submission_uncertain'
+                return SubmissionUncertain(self.serial, 'sdk_send_uncertain')
+            return Submitted(self.serial)
+
+
+def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True, admission=None):
+    admission = admission or AdmissionBoundary()
     ceiling = MAX_LEVEL
+    scopes = []
+    reservation = None
     def target():
         nonlocal ceiling
-        value = wanted()
+        value = (wanted(reservation=reservation) if reservation is not None
+            and reservation.snapshot is not None else wanted())
         request = value if isinstance(value, FanRequest) else FanRequest(value)
         if type(request.level) is not int or not 0 <= request.level <= MAX_LEVEL:
             raise ValueError("请求档位必须为 0 到 16 的整数")
-        if type(request.limit) is not int or request.limit not in (10, MAX_LEVEL):
+        if type(request.limit) is not int or not 10 <= request.limit <= MAX_LEVEL:
             raise ValueError("风力授权上限无效")
-        authorized = (isinstance(request.high_wind, HighWindAuthority)
-                      and request.high_wind.valid_at(time.monotonic()))
-        ceiling = min(ceiling, request.limit, MAX_LEVEL if not high_wind_gate or authorized else 10)
+        authority = request.high_wind if isinstance(request.high_wind, HighWindAuthority) else HighWindAuthority()
+        if high_wind_gate:
+            scopes.append(authority)
+        ceiling = min(ceiling, request.limit, authority.ceiling_at(time.monotonic()) if high_wind_gate else MAX_LEVEL)
         return FanRequest(min(request.level, ceiling), request.protected, request.release,
-                          request.read_only_floor, request.upward_only, ceiling, request.high_wind, request.motion)
+                          request.read_only_floor, request.upward_only, ceiling, request.high_wind, request.motion,
+                          request.snapshot)
 
     def destination(request):
-        if actual[2] > request.limit:
-            return request.limit
+        candidate = movement(request)
+        if high_wind_gate and max(actual[2], candidate) > 10 and candidate != actual[2]:
+            if not all(authority.permits(time.monotonic(), actual[2], candidate) for authority in scopes):
+                return actual[2]
+        return candidate
+
+    def movement(request):
         if high_wind_gate and request.level > actual[2]:
             motion = request.motion
             emergency = (isinstance(motion, MotionAuthority) and motion.source is not None
@@ -386,6 +754,8 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
                 and type(motion.actual_c) in (int, float) and type(motion.critical_c) in (int, float)
                 and math.isfinite(motion.actual_c) and math.isfinite(motion.critical_c)
                 and motion.critical_c >= 75 and motion.actual_c >= motion.critical_c)
+            if isinstance(request.high_wind.proof if request.high_wind else None, Measured80):
+                emergency = False
             restoration = (isinstance(motion, MotionAuthority) and type(motion.restore_level) is int
                 and motion.restore_from == actual[2] and request.level == min(request.limit, motion.restore_level)
                 and type(motion.deadline) in (int, float) and math.isfinite(motion.deadline)
@@ -393,6 +763,8 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             if not emergency and not restoration:
                 if time.monotonic() - schedule.last_increase < 10:
                     return actual[2]
+                if isinstance(request.high_wind.proof if request.high_wind else None, Measured80):
+                    return min(request.level, 10 if actual[2] < 10 else actual[2] + 1)
                 return min(request.level, actual[2] + 2)
         if request.read_only_floor is not None or request.upward_only:
             return max(request.level, actual[2])
@@ -418,6 +790,11 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
         if request.protected and request.level < actual[2]:
             return actual[2]
         return max(request.level, actual[2] - step) if request.level < actual[2] else request.level
+
+    def activation_allowed(request):
+        candidate = destination(request)
+        return (not high_wind_gate or all(authority.permits_activation(
+            time.monotonic(), actual[2], candidate) for authority in scopes))
 
     def readback():
         actual = device.send("get_prop", ["power", "mode", "favorite_level", "motor1_speed", "temp_dec"])
@@ -449,7 +826,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
         return actual[0] == "on" and actual[1] == "favorite" and actual[3] > 0
 
     def finish(error="", execution="pending"):
-        if schedule.attempts >= 2:
+        if schedule.attempts >= 2 and not schedule.legacy_pending:
             schedule.fault = True
             execution = "fault"
         if schedule.persistence_error:
@@ -457,6 +834,7 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
             result["verified_at"] = None
             result["observed_mono"] = None
         result.update(error=error, execution=execution, attempts=schedule.attempts, fault=schedule.fault)
+        result['legacy_migration_pending'] = schedule.legacy_pending
         return result
 
     try:
@@ -469,6 +847,17 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
     request = target()
     level = request.level
     running = observed(actual, observed_mono, observed_wall)
+    if schedule.legacy_pending:
+        def migration_readback():
+            nonlocal actual, observed_mono, observed_wall, running
+            actual, observed_mono, observed_wall = readback()
+            running = observed(actual, observed_mono, observed_wall)
+            return actual, observed_mono, observed_wall
+        if not admission.retire_legacy(schedule, target, migration_readback):
+            return finish('legacy_migration_pending_fresh_requalification')
+        result['protection_interrupted'] = False
+        request = target()
+        level = request.level
     if running and actual[2] == level and (not schedule.persistence_error or level == request.limit):
         if (schedule.attempts or schedule.expected_level is not None or schedule.fault or schedule.persistence_error) and not schedule.persist_debt_then_set_budget(0, None):
             return finish(execution="fault")
@@ -482,11 +871,11 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
         return finish("真实读回已恢复，先发布当前状态；上调请求保留原执行截止")
     if request.upward_only and not running:
         return finish("通信恢复状态异常，停止本次写入并请求保护", "fault")
-    if schedule.fault:
-        return finish("两次修正未确认，故障锁定；仅观察实际匹配且转动的状态以恢复", "fault")
-    if running and actual[2] == schedule.expected_level:
+    if not schedule.persistence_error and running and actual[2] == schedule.expected_level:
         if not schedule.persist_debt_then_set_budget(0, None):
             return finish(execution="fault")
+    if schedule.fault:
+        return finish("两次修正未确认，故障锁定；仅观察实际匹配且转动的状态以恢复", "fault")
     now = time.monotonic()
     if now - schedule.last_attempt < 8:
         return finish("等待八秒暂定观察间隔，最新请求待执行")
@@ -499,34 +888,86 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
         return finish("档位已匹配，等待正转速读回")
     latest = target()
     level = destination(latest)
+    if not running and not activation_allowed(latest):
+        return finish("高档保持仅限只读，无当前危急授权不得开机或切换模式")
     if level < actual[2] and now - schedule.last_decrease < 30:
         return finish("距离上次执行降档不足三十秒，最新请求待执行")
     if actual[:3] == ["on", "favorite", level]:
         return finish("最新请求已合并，等待转速或下一步降档")
+    if latest.snapshot is not None and latest.snapshot.blocker:
+        return finish(latest.snapshot.blocker)
     schedule.last_attempt = time.monotonic()
+    reserved_snapshot = latest.snapshot
+    reservation = BudgetReservation(schedule.attempts + 1, level, schedule.last_attempt, reserved_snapshot)
     if not schedule.persist_debt_then_set_budget(schedule.attempts + 1, level, schedule.attempts + 1 >= 2):
         return finish(execution="fault")
+    if (schedule.attempts, schedule.expected_level, schedule.last_attempt) != (
+            reservation.attempts, reservation.level, reservation.last_attempt):
+        return finish('durable_motor_reservation_changed')
     result["protection_interrupted"] = result["protection_interrupted"] or schedule.fault
     result["verified_at"] = None
     result["observed_mono"] = None
     result.update(ambient_c=None, ambient_source=None, ambient_observed_mono=None, ambient_verified_at=None)
-    def mutate(function, *args, decrease=False, increase=False):
-        schedule.last_attempt = time.monotonic()
+    def validate_entry(request, command, now):
+        authority = request.high_wind or HighWindAuthority()
+        if (high_wind_gate and max(actual[2], command[1]) > 10 and actual[:2] == ['on', 'favorite']
+                and (not running or not 0 <= now - observed_mono < 6)):
+            return 'running_endpoint_invalid'
+        if request.snapshot is not None and isinstance(authority.proof,
+                (Measured80, SourceFaultProtection, FailedDescentRestoration, NoAscent)):
+            if authority.proof.generation != request.snapshot.generation:
+                return 'source_generation_changed'
+        if command[0] in ('on', 'mode'):
+            if not activation_allowed(request):
+                return 'activation_revoked'
+        elif ((destination(request) != command[1] if high_wind_gate else command[1] > request.limit)
+                or schedule.expected_level != command[1]
+                or command[1] < actual[2] and now - schedule.last_decrease < 30):
+            return 'exact_command_revoked'
+        if high_wind_gate and max(actual[2], command[1]) > 10:
+            if not all(scope.valid_at(now) and scope.permits(now, actual[2], command[1]) for scope in scopes):
+                return 'high_wind_proof_revoked'
+        if request.snapshot is not None and isinstance(authority.proof, NoAscent):
+            if (command[0] != 'level' or request.snapshot.operation is not authority.proof.operation
+                    or authority.proof.generation != request.snapshot.generation):
+                return 'exact_ceiling_exit_required'
+        return None
+
+    def mutate(sdk_mutation, *args, command, decrease=False, increase=False):
+        nonlocal reservation
+        expected = latest.snapshot
         try:
-            function(*args)
+            submission = admission.submit_guarded(command, expected, reservation, schedule,
+                target, validate_entry, sdk_mutation, args, high_wind_gate=high_wind_gate)
+            result['submission'] = dict(state=type(submission).__name__,
+                dispatch_id=getattr(submission, 'dispatch_id', None), reason=getattr(submission, 'reason', None))
+            return submission
         finally:
-            schedule.last_attempt = time.monotonic()
-            if decrease:
+            if 'submission' in locals() and not isinstance(submission, Refused):
+                schedule.last_attempt = time.monotonic()
+            if decrease and 'submission' in locals() and not isinstance(submission, Refused):
                 schedule.last_decrease = schedule.last_attempt
-            if increase:
+            if increase and 'submission' in locals() and not isinstance(submission, Refused):
                 schedule.last_increase = schedule.last_attempt
+            if 'submission' in locals() and not isinstance(submission, Refused):
+                reservation = replace(reservation, last_attempt=schedule.last_attempt)
     try:
         if actual[0] != "on":
-            mutate(device.on)
+            if not activation_allowed(target()):
+                return finish("开机前授权已收窄，保持只读")
+            submission = mutate(device.on, command=('on', level))
+            if not isinstance(submission, Submitted):
+                return finish(getattr(submission, 'reason', 'submission_uncertain'))
         if actual[1] != "favorite":
-            mutate(device.set_mode, OperationMode.Favorite)
+            if not activation_allowed(target()):
+                return finish("切换模式前授权已收窄，保持只读")
+            submission = mutate(device.set_mode, OperationMode.Favorite, command=('mode', level))
+            if not isinstance(submission, Submitted):
+                return finish(getattr(submission, 'reason', 'submission_uncertain'))
         while True:
             latest = target()
+            if reserved_snapshot is not None and (latest.snapshot != reserved_snapshot or latest.snapshot.blocker):
+                return finish('actuation_snapshot_changed_after_budget')
             next_level = destination(latest)
             level = next_level if high_wind_gate else min(latest.limit, max(level, next_level))
             if level < actual[2] and time.monotonic() - schedule.last_decrease < 30:
@@ -535,8 +976,17 @@ def fan_apply(device, wanted, schedule, *, read_only=None, high_wind_gate=True):
                 break
             if not schedule.persist_debt_then_set_budget(schedule.attempts, level, schedule.fault):
                 return finish(execution="fault")
+            reservation = replace(reservation, level=level)
+            if (schedule.attempts, schedule.expected_level, schedule.last_attempt) != (
+                    reservation.attempts, reservation.level, reservation.last_attempt):
+                return finish('durable_motor_reservation_changed')
         if actual[2] != level:
-            mutate(device.set_favorite_level, level, decrease=level < actual[2], increase=level > actual[2])
+            submission = mutate(device.set_favorite_level, level, command=('level', level),
+                decrease=level < actual[2], increase=level > actual[2])
+            if not isinstance(submission, Submitted):
+                return finish(getattr(submission, 'reason', 'submission_uncertain'))
+        elif reserved_snapshot is not None:
+            return finish('reserved_command_revoked')
         result["level"], result["rpm"], result["power"], result["mode"] = None, None, None, None
         actual, observed_mono, observed_wall = readback()
         running = observed(actual, observed_mono, observed_wall)
@@ -612,7 +1062,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
     state = {"settings": settings, "nodes": [], "decision": {"level": MAX_LEVEL, "reasons": ["启动保护风力请求"]},
              "fan": {"configured": False, "confirmed": False, "level": None, "rpm": None,
                      "fault": motor_schedule.fault, "attempts": motor_schedule.attempts,
-                     "error": motor_schedule.persistence_error or "尚未绑定本地执行凭据，无法执行风力控制"}, "storage_error": "",
+                     "legacy_migration_pending": motor_schedule.legacy_pending,
+                     "error": motor_schedule.persistence_error or ('legacy_migration_pending_fresh_requalification'
+                         if motor_schedule.legacy_pending else "尚未绑定本地执行凭据，无法执行风力控制")}, "storage_error": "",
              "settings_error": "", "settings_task": None, "storage_health": StorageHealth(),
              "dropped_records": 0, "log_bytes": 0, "last_poll": time.monotonic(),
              "last_fan": time.monotonic(), "updated_at": None, "stop": False,
@@ -641,6 +1093,14 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     **{key: usage.get(key, 0) for key in ("checkpoint_bytes", "preserved_bytes", "reserved_bytes")})
 
     state["learning"] = learning.status(settings) if learning_enabled else disabled_learning(archive_usage)
+    memory = (ThermalMemoryGate(ThermalMemoryStore(root,
+        dict(device=MOTOR_IDENTITY, hosts=list(HOSTS)), atomic_write, fsync_directory))
+        if fixed_storage else None)
+    state["thermal_memory"] = memory
+    admission = AdmissionBoundary()
+    state['admission'] = admission
+    if memory is not None:
+        await memory.initialize(state["controller"], time.monotonic())
 
     @web.middleware
     async def protection(request, handler):
@@ -676,17 +1136,25 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
     app[STATE] = state
 
     def protect(reason="服务或执行条件异常，重新建立保护风力基线"):
-        decision = state["controller"].protect(reason, time.monotonic())
+        now = time.monotonic()
+        controller = state["controller"]
+        if memory is not None:
+            memory.invalidate()
+        decision = controller.protect(reason, now)
+        if memory is not None:
+            memory.publish(controller)
         state["decision"].update(decision)
-        state["fan_request"] = FanRequest(state["controller"].effective_limit(time.monotonic()), protected=True,
-                                          limit=state["controller"].effective_limit(time.monotonic()))
+        limit = controller.effective_limit(now)
+        state["fan_request"] = FanRequest(limit, protected=True, limit=limit,
+                                          high_wind=controller.high_wind, motion=controller.motion)
         return decision
 
-    def fan_healthy():
+    def fan_healthy(reservation=None):
         observed = state["fan"]
         gear, rpm, stamp = observed.get("level"), observed.get("rpm"), observed.get("verified_at")
         mono = observed.get("observed_mono")
-        return (observed.get("configured") and not state["motor_schedule"].fault
+        reserved_second_attempt = (reservation is not None and reservation.owns_second_attempt(state['motor_schedule']))
+        return (observed.get("configured") and (not state["motor_schedule"].fault or reserved_second_attempt)
                 and not observed.get("fault") and observed.get("execution") != "fault"
                 and observed.get("power") == "on" and observed.get("mode") == "favorite"
                 and type(gear) is int and 0 <= gear <= MAX_LEVEL
@@ -700,40 +1168,80 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             return "healthy", False
         now = time.monotonic()
         controller = state["controller"]
-        eligible = (fan_healthy() and state["fan"].get("confirmed") is True
+        hold_eligible = (fan_healthy() and state["fan"].get("confirmed") is True
                     and state["fan"].get("execution") == "matched"
                     and state["fan"].get("level") == controller.operating.confirmed_level
                     and controller.storage_safe(now) and 0 <= now - state["last_poll"] <= 6
                     and state["settings_task"] is None
                     and not state["motor_schedule"].attempts and not state["motor_schedule"].persistence_error
                     and not state["settings_error"] and not state["pairing"])
-        phase = state["storage_health"].refresh(now, eligible=eligible)
-        return phase, eligible
+        phase = state["storage_health"].refresh(now, hold_eligible=hold_eligible)
+        return phase, hold_eligible
 
     def storage_hard():
         phase, _ = storage_phase()
         return phase == "protect" or bool(state["storage_error"]) and phase == "healthy"
 
-    def request_snapshot():
+    def merged_request(reservation=None):
         base = state["fan_request"]
-        limit = state["controller"].effective_limit(time.monotonic())
-        authority = state["controller"].high_wind if high_wind_gate else None
-        hold = readback_hold(time.monotonic())
+        current = state["controller"].high_wind if high_wind_gate else None
+        authority = base.high_wind if current == base.high_wind else None
+        limit = authority.ceiling_at(time.monotonic()) if high_wind_gate and authority is not None else 10 if high_wind_gate else MAX_LEVEL
+        hold = readback_hold(time.monotonic(), reservation)
+        schedule, actual = state['motor_schedule'], state['fan'].get('level')
+        unconfirmed_protective_ascent = (schedule.attempts and type(actual) is int
+            and type(schedule.expected_level) is int and schedule.expected_level > actual
+            and schedule.expected_level != base.level)
         protected = bool(state["force_max"] or storage_hard()
+                or unconfirmed_protective_ascent
                 or state["settings_error"] or state["pairing"] or state["settings_task"] is not None
-                or time.monotonic() - state["last_poll"] > 6 or not fan_healthy() and hold is None)
+                or time.monotonic() - state["last_poll"] > 6 or not fan_healthy(reservation) and hold is None)
         if protected:
             return FanRequest(limit, protected=True, limit=limit, high_wind=authority, motion=base.motion)
+        ceiling_exit = (authority is not None and isinstance(authority.proof, NoAscent)
+            and authority.proof.generation is not None)
+        if ceiling_exit:
+            ready = (storage_phase()[0] == 'healthy' and (memory is None or memory.ready))
+            return FanRequest(base.level if ready else state['fan'].get('level', base.level),
+                upward_only=not ready, limit=limit, high_wind=authority, motion=base.motion)
         level = min(limit, max(base.level, state["settings"]["manual_level"] or 0,
                     hold.hold_level if hold else 0))
-        if storage_phase()[0] == "holding":
-            return FanRequest(max(level, state["fan"]["level"]), upward_only=True,
+        if storage_phase()[0] == "holding" or memory is not None and not memory.ready:
+            observed_level = state["fan"].get("level")
+            return FanRequest(max(level, observed_level if type(observed_level) is int else level), upward_only=True,
                               limit=limit, high_wind=authority, motion=base.motion)
         if hold is not None:
             return FanRequest(level, upward_only=True, limit=limit, high_wind=authority)
         release = (base.release if base.level == level and not base.protected
                    and state["settings"]["manual_level"] is None else None)
         return FanRequest(level, release=release, limit=limit, high_wind=authority, motion=base.motion)
+
+    def request_snapshot(reservation=None):
+        request = merged_request(reservation)
+        controller, observed = state['controller'], state['fan']
+        operation = controller._policy['operation']
+        episode = operation.get('episode') if operation else None
+        phase = storage_phase()[0]
+        digest = memory_digest(controller.export_thermal_memory()) if memory is not None else None
+        acknowledged = memory.acknowledged_digest if memory is not None else None
+        actual = observed.get('level')
+        needs_intent = type(actual) is not int or max(actual, request.level) > 10 or request.level < actual
+        blocker = ('settings_revision_pending' if state['settings_task'] is not None or state['settings_error'] else
+            'pairing' if state['pairing'] else 'storage_' + phase if phase != 'healthy' or storage_hard() else
+            'memory_conflict' if controller._thermal_memory.saturated else
+            'memory_failed' if memory is not None and (memory.error or memory.load_failed) else
+            'current_memory_not_acknowledged' if needs_intent and memory is not None and (not memory.ready
+                or memory.desired_digest != digest or digest != acknowledged) else None)
+        snapshot = ActuationSnapshot(controller.thermal_view.generation, state['settings_revision'],
+            episode, operation.get('status') if operation else None,
+            episode.original_deadline if episode is not None else None, request.high_wind,
+            controller.effective_limit(time.monotonic()), state['decision'].get('demand', request.level),
+            request.level, state['decision'].get('transition_target'),
+            tuple(observed.get(k) for k in ('power', 'mode', 'level', 'rpm', 'observed_mono')),
+            digest, acknowledged, controller._thermal_memory.revision, phase,
+            tuple(sorted(MOTOR_IDENTITY.items())), blocker, controller.thermal_view)
+        state['actuation_snapshot'] = snapshot
+        return replace(request, snapshot=snapshot)
 
     def publish_request(decision, now):
         trial = decision.get("execution_trial") or {}
@@ -746,22 +1254,24 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 and now < trial.get("original_deadline", -math.inf)):
             authority = ReleaseAuthority(trial["original_from"], trial["to"], trial["planned_step"],
                                          trial["requested_at"], trial["original_deadline"])
-        state["fan_request"] = FanRequest(decision["level"], release=authority, motion=state["controller"].motion)
+        state["fan_request"] = FanRequest(decision["level"], release=authority,
+            high_wind=state["controller"].high_wind, motion=state["controller"].motion)
 
-    def readback_hold(now):
+    def readback_hold(now, reservation=None):
         schedule = state["motor_schedule"]
         hold = readback_episode.assessment(now)
         controller = state["controller"]
         operation = controller._policy["operation"]
         lease = readback_episode.active_recovery
+        reserved_second_attempt = reservation is not None and reservation.owns_second_attempt(schedule)
         restoring = (hold is not None and isinstance(lease, ActiveRecoveryLease)
             and lease.assessment is readback_episode.published and lease.fan is state["fan"]
             and lease.episode is (operation["episode"] if controller._pending() else None)
             and now < lease.deadline
             and min(controller.effective_limit(now), max(state["fan_request"].level, state["settings"]["manual_level"] or 0, hold.hold_level)) == lease.target
-            and schedule.attempts == 1 and schedule.expected_level == lease.target)
+            and (schedule.attempts == 1 or reserved_second_attempt) and schedule.expected_level == lease.target)
         if (not controller.communication_safe(now)
-                or schedule.fault or schedule.persistence_error or (schedule.attempts
+                or schedule.fault and not reserved_second_attempt or schedule.persistence_error or (schedule.attempts
                 or schedule.expected_level is not None) and not restoring or state["fan"].get("fault")
                 or state["fan"].get("execution") == "fault"
                 or state["fan"].get("protection_interrupted")
@@ -806,10 +1316,10 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             return {}
         if (len(nodes) != len(HOSTS) or {node.get("host") for node in nodes} != set(HOSTS)
                 or any(not node.get("online") or node.get("thermal_throttle") or node.get("ambiguous_sensors")
-                       or type(node.get("source_ts")) not in (int, float) or not math.isfinite(node["source_ts"])
+                       or source_timing(node, now) is None
                        or (node["source_ts"] <= state["controller"].sources.get(node["host"], -math.inf) if advancing
                            else node["source_ts"] < state["controller"].sources.get(node["host"], -math.inf))
-                       or not 0 <= now - node.get("requested_mono", -math.inf) <= 6 for node in nodes)):
+                       for node in nodes)):
             return {}
         return {host: policy for host, policy in cached.get("published", {}).items()
                 if 0 <= wall - policy["generated_at"] <= WINDOW
@@ -895,19 +1405,20 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 "high_wind_limit": state["controller"].effective_limit(time.monotonic()),
                 "high_wind_witness": state["controller"].high_wind.witness
                     if state["controller"].effective_limit(time.monotonic()) > 10 else None,
-                "high_wind_expires_mono": state["controller"].high_wind.observed_mono + HIGH_WIND_TTL
-                    if state["controller"].high_wind.allowed else None,
+                "high_wind_expires_mono": state["controller"].high_wind.expires_mono,
                 "requested_level": requested_level, "settings_pending": state["settings_task"] is not None,
                 "read_only": False, "control_mode": "auto" if state["settings"]["manual_level"] is None else "manual",
                 "strategy_mode": "learning" if learning_enabled else "rules",
                 "control_active": not state["stop"] and state["updated_at"] is not None and time.monotonic() - state["last_poll"] < 8,
                 "history_recording": dict(state["history_recording"]),
+                "thermal_memory": memory.status() if memory is not None else dict(state="not_applicable"),
                 "storage_health": state["storage_health"].status() if fixed_storage else dict(
                     phase="protect" if state["storage_error"] else "healthy", bounded_protocol=False),
                 "fan": current_fan(requested_level),
                 "learning": (dict(state["learning"], enabled=True, active=active_power(state["nodes"], time.monotonic(), time.time()))
                              if learning_enabled else disabled_learning(state["learning"])),
                 "server_time": time.time(), "period_seconds": 3,
+                "control_period_seconds": 3, "record_period_seconds": 3,
                 "controller_age_seconds": round(time.monotonic() - state["last_poll"], 2)})
 
     async def history(request):
@@ -931,13 +1442,11 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                                       "aggregation": "时间桶内最高温，缺失记录保留"})
 
     async def configure(request):
-        if state["stop"] or state["settings_task"] is not None:
-            raise web.HTTPConflict(text="设置正在保存或服务正在停止，请刷新状态后重试")
-        state["settings_revision"] += 1
         async def transaction():
             try:
                 proposed = settings_checked(await request.json())
-                protect()
+                async with admission.publication():
+                    protect()
                 def save():
                     try:
                         atomic_write(settings_path, json.dumps(proposed))
@@ -964,49 +1473,60 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                         return proposed, "", "设置已保存，但历史或学习状态维护失败，可能已部分清理；检查磁盘后重试", None, (
                             learning.status(proposed) if learning_enabled else disabled_learning(state["learning"]))
                 actual, error, maintenance_error, size, cached = await disk_call(save)
-                if actual is not None:
-                    state["settings"] = actual
-                state["settings_error"] = error
-                if maintenance_error:
-                    if fixed_storage:
-                        state["storage_health"].failure(time.monotonic(), time.time(), RuntimeError(),
-                            "settings_maintenance", None, eligible=False)
-                    state["storage_error"] = maintenance_error
-                if size is not None:
-                    state["log_bytes"] = size
-                if cached is not None:
-                    state["learning"] = dict(cached, settings_revision=state["settings_revision"])
-                protect()
+                async with admission.publication():
+                    if actual is not None:
+                        state["settings"] = actual
+                    state["settings_error"] = error
+                    if maintenance_error:
+                        if fixed_storage:
+                            state["storage_health"].failure(time.monotonic(), time.time(), RuntimeError(),
+                                "settings_maintenance", None, hold_eligible=False)
+                        state["storage_error"] = maintenance_error
+                    if size is not None:
+                        state["log_bytes"] = size
+                    if cached is not None:
+                        state["learning"] = dict(cached, settings_revision=state["settings_revision"])
+                    protect()
                 return web.json_response({"ok": not error, "settings": state["settings"],
                     "settings_known": actual is not None, "error": error,
                     "maintenance_error": maintenance_error}, status=503 if error else 200)
             finally:
-                state["settings_task"] = None
-        state["settings_task"] = asyncio.create_task(transaction())
-        return await drain_owned(state["settings_task"])
+                async with admission.publication():
+                    if state["settings_task"] is asyncio.current_task():
+                        state["settings_task"] = None
+        async with admission.publication():
+            if state["stop"] or state["settings_task"] is not None:
+                raise web.HTTPConflict(text="设置正在保存或服务正在停止，请刷新状态后重试")
+            state["settings_revision"] += 1
+            task = asyncio.create_task(transaction())
+            state["settings_task"] = task
+        return await drain_owned(task)
 
     async def pair_token(*, admit):
         async def transaction():
             async with state["pair_lock"]:
                 credential = admit()
-                state["pairing"] = True
-                protect()
+                async with admission.publication():
+                    state["pairing"] = True
+                    protect()
                 try:
                     device = await asyncio.to_thread(device_from_token, credential)
                     await disk_call(atomic_write, root / "device-token", credential.lower())
                     async with state["fan_lock"]:
-                        state["device"] = device
-                        protect()
-                        state["last_identity"] = time.monotonic()
-                        state["fan"] = {"configured": True, "confirmed": False, "level": None, "rpm": None,
-                                        "fault": state["motor_schedule"].fault, "attempts": state["motor_schedule"].attempts,
-                                        "error": state["motor_schedule"].persistence_error or "凭据已保存，等待受限执行与实际设备读回"}
+                        async with admission.publication():
+                            state["device"] = device
+                            protect()
+                            state["last_identity"] = time.monotonic()
+                            state["fan"] = {"configured": True, "confirmed": False, "level": None, "rpm": None,
+                                            "fault": state["motor_schedule"].fault, "attempts": state["motor_schedule"].attempts,
+                                            "error": state["motor_schedule"].persistence_error or "凭据已保存，等待受限执行与实际设备读回"}
                 except web.HTTPException:
                     raise
                 except Exception:
                     raise ValueError("设备绑定验证或保存失败") from None
                 finally:
-                    state["pairing"] = False
+                    async with admission.publication():
+                        state["pairing"] = False
         await drain_owned(transaction())
 
     state["qr"] = QRConnector(pair_token)
@@ -1055,7 +1575,7 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     if len(raw) > 262144:
                         raise ValueError
                 data = json.loads(raw)
-            return normalize(host, data, started, wall)
+            return normalize(host, data, started, time.time())
         except Exception as error:
             transport = isinstance(error, (asyncio.TimeoutError, OSError, aiohttp.ClientConnectionError))
             return {"host": host, "hostname": host, "online": False, "sampled_at": wall,
@@ -1070,49 +1590,59 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                 wall = time.time()
                 nodes = await asyncio.gather(*(poll(session, host, wall) for host in HOSTS))
                 now = time.monotonic()
-                minimum = state["settings"]["manual_level"]
-                power_thresholds = active_power(nodes, now, wall, advancing=True) if learning_enabled else {}
-                feedback = current_fan(wanted())
-                hold = readback_hold(now)
-                if hold is not None:
-                    feedback["readback_hold"] = dict(level=hold.hold_level, failures=hold.failures,
-                        recovering=hold.recovering_at is not None, stage=hold.stage,
-                        until=hold.last_good + 30 if hold.stage != "lost" else now + 3)
-                if state["motor_schedule"].fault:
-                    feedback["fault"] = True
-                decision = state["controller"].decide(nodes, now, minimum_level=0 if minimum is None else minimum,
-                                                       power_thresholds=power_thresholds,
-                                                       feedback=feedback,
-                                                       manual_level=minimum)
-                if not learning_enabled:
-                    decision["learning_eligible"] = False
-                if storage_phase()[0] == "holding":
-                    decision.update(state["controller"].pause_release("日志暂态中断，暂停下降观察", now))
-                if (storage_hard() or state["settings_error"] or not fan_healthy() and hold is None
-                        or state["pairing"] or state["settings_task"] is not None):
-                    decision.update(protect())
-                state.update(nodes=nodes, decision=decision, last_poll=now, updated_at=wall)
-                publish_request(decision, now)
-                requested_level = wanted()
-                row_power_thresholds = active_power(nodes, now, wall) if learning_enabled else {}
-                row = {"ts": wall, "snapshot_at": time.time(), "nodes": nodes,
-                       "control": {"manual_level": minimum}, "decision": deepcopy(decision),
-                       "fan": current_fan(requested_level), "requested_level": requested_level,
-                       "active_power_policy": {host: {key: policy[key] for key in
-                           ("version", "threshold_w", "source", "generated_at")} for host, policy in row_power_thresholds.items()},
-                       "learning": {"enabled": learning_enabled, "healthy": learning_healthy(), "mono": now,
-                                    "revision": state["settings_revision"],
-                                    "dropped_records": state["dropped_records"],
-                                    "elapsed": now - state["learning_mono"] if state["learning_mono"] is not None else 0}}
-                state["learning_wall"], state["learning_mono"] = wall, now
-                try:
-                    state["queue"].put_nowait(row)
-                except asyncio.QueueFull as error:
-                    if fixed_storage:
-                        state["storage_health"].failure(time.monotonic(), time.time(), error, "queue", False, eligible=False)
-                    state["dropped_records"] += 1
-                    state["storage_error"] = "磁盘写入滞后，采样记录丢失，保护风力请求"
-                    protect()
+                async with admission.publication():
+                    minimum = state["settings"]["manual_level"]
+                    power_thresholds = active_power(nodes, now, wall, advancing=True) if learning_enabled else {}
+                    feedback = current_fan(wanted())
+                    hold = readback_hold(now)
+                    if hold is not None:
+                        feedback["readback_hold"] = dict(level=hold.hold_level, failures=hold.failures,
+                            recovering=hold.recovering_at is not None, stage=hold.stage,
+                            until=hold.last_good + 30 if hold.stage != "lost" else now + 3)
+                    feedback.update(motor_attempts=state["motor_schedule"].attempts,
+                        motor_fault=state["motor_schedule"].fault or bool(state["motor_schedule"].persistence_error),
+                        next_motor_at=max(state["motor_schedule"].last_attempt + 8,
+                            state["motor_schedule"].last_decrease + 30))
+                    if state["motor_schedule"].fault:
+                        feedback["fault"] = True
+                    if memory is not None:
+                        memory.invalidate()
+                    decision = state["controller"].decide(nodes, now, minimum_level=0 if minimum is None else minimum,
+                                                           power_thresholds=power_thresholds,
+                                                           feedback=feedback,
+                                                           manual_level=minimum)
+                    if not learning_enabled:
+                        decision["learning_eligible"] = False
+                    if storage_phase()[0] == "holding":
+                        decision.update(state["controller"].pause_release("日志暂态中断，暂停下降观察", now))
+                    if (storage_hard() or state["settings_error"] or not fan_healthy() and hold is None
+                            or state["pairing"] or state["settings_task"] is not None):
+                        decision.update(protect())
+                    state.update(nodes=nodes, decision=decision, last_poll=now, updated_at=wall)
+                    publish_request(decision, now)
+                    if memory is not None:
+                        memory.publish(state["controller"])
+                        decision["thermal_memory"] = memory.status()
+                    requested_level = wanted()
+                    row_power_thresholds = active_power(nodes, now, wall) if learning_enabled else {}
+                    row = {"ts": wall, "snapshot_at": time.time(), "nodes": nodes,
+                           "control": {"manual_level": minimum}, "decision": deepcopy(decision),
+                           "fan": current_fan(requested_level), "requested_level": requested_level,
+                           "active_power_policy": {host: {key: policy[key] for key in
+                               ("version", "threshold_w", "source", "generated_at")} for host, policy in row_power_thresholds.items()},
+                           "learning": {"enabled": learning_enabled, "healthy": learning_healthy(), "mono": now,
+                                        "revision": state["settings_revision"],
+                                        "dropped_records": state["dropped_records"],
+                                        "elapsed": now - state["learning_mono"] if state["learning_mono"] is not None else 0}}
+                    state["learning_wall"], state["learning_mono"] = wall, now
+                    try:
+                        state["queue"].put_nowait(row)
+                    except asyncio.QueueFull as error:
+                        if fixed_storage:
+                            state["storage_health"].failure(time.monotonic(), time.time(), error, "queue", False, hold_eligible=False)
+                        state["dropped_records"] += 1
+                        state["storage_error"] = "磁盘写入滞后，采样记录丢失，保护风力请求"
+                        protect()
                 deadline += 3
                 if deadline < now:
                     deadline = now + 3
@@ -1172,39 +1702,54 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             outcome = dict(phase="dispatch", committed=False)
             try:
                 config, revision = dict(state["settings"]), state["settings_revision"]
+                dispatch_epoch = state["storage_health"].failure_epoch
                 size, cached = await disk_call(write, row, config, outcome)
-                state["log_bytes"] = size
-                if fixed_storage:
-                    _, eligible = storage_phase()
-                    state["storage_health"].success(time.monotonic(), eligible=eligible)
-                state["storage_error"] = ("" if not fixed_storage or state["storage_health"].phase == "healthy"
-                                          else "日志恢复观察中，暂停下降")
-                if not learning_enabled:
-                    state["learning"] = cached
-                elif (revision == state["settings_revision"] and row.get("learning", {}).get("revision") == revision
-                        and row.get("ts") == state["updated_at"] and learning_healthy()
-                        and context_of(state["nodes"]) == cached["eligibility"].get("context")):
-                    state["learning"] = dict(cached, settings_revision=revision)
-                else:
-                    state["learning"] = dict(cached, settings_revision=-1)
+                async with admission.publication():
+                    state["log_bytes"] = size
+                    if fixed_storage:
+                        _, hold_eligible = storage_phase()
+                        if dispatch_epoch == state["storage_health"].failure_epoch:
+                            verified_revision = (revision if outcome["phase"] == "accounting"
+                                and outcome["committed"] is True and revision == state["settings_revision"]
+                                and config == state["settings"] and state["settings_task"] is None
+                                and not state["settings_error"] else None)
+                            state["storage_health"].success(time.monotonic(), hold_eligible=hold_eligible,
+                                verified_revision=verified_revision)
+                            state["storage_error"] = ("" if state["storage_health"].phase == "healthy"
+                                                      else "日志恢复观察中，暂停下降")
+                    else:
+                        state["storage_error"] = ""
+                    if not learning_enabled:
+                        state["learning"] = cached
+                    elif (revision == state["settings_revision"] and row.get("learning", {}).get("revision") == revision
+                            and row.get("ts") == state["updated_at"] and learning_healthy()
+                            and context_of(state["nodes"]) == cached["eligibility"].get("context")):
+                        state["learning"] = dict(cached, settings_revision=revision)
+                    else:
+                        state["learning"] = dict(cached, settings_revision=-1)
             except Exception as error:
-                _, eligible = storage_phase()
-                phase = (state["storage_health"].failure(time.monotonic(), time.time(), error,
-                    outcome["phase"], outcome["committed"], eligible=eligible) if fixed_storage else "protect")
-                state["storage_error"] = ("日志暂态中断，限时暂停下降" if phase == "holding" else
-                                          "日志异常，保护风力请求。检查存储状态。")
-                if outcome["committed"] is False:
-                    state["dropped_records"] += 1
-                if state["history_recording"]["writes"] == writes_before:
-                    state["history_recording"].update(state="failed" if outcome["committed"] is False else "uncertain",
-                        failed_writes=state["history_recording"]["failed_writes"] + 1,
-                        error=state["storage_error"])
-                if phase == "holding":
-                    decision = state["controller"].pause_release(state["storage_error"], time.monotonic())
-                    state["decision"].update(decision)
-                    publish_request(decision, time.monotonic())
-                else:
-                    protect(state["storage_error"])
+                async with admission.publication():
+                    _, hold_eligible = storage_phase()
+                    phase = (state["storage_health"].failure(time.monotonic(), time.time(), error,
+                        outcome["phase"], outcome["committed"], hold_eligible=hold_eligible) if fixed_storage else "protect")
+                    state["storage_error"] = ("日志暂态中断，限时暂停下降" if phase == "holding" else
+                                              "日志异常，保护风力请求。检查存储状态。")
+                    if outcome["committed"] is False:
+                        state["dropped_records"] += 1
+                    if state["history_recording"]["writes"] == writes_before:
+                        state["history_recording"].update(state="failed" if outcome["committed"] is False else "uncertain",
+                            failed_writes=state["history_recording"]["failed_writes"] + 1,
+                            error=state["storage_error"])
+                    if phase == "holding":
+                        if memory is not None:
+                            memory.invalidate()
+                        decision = state["controller"].pause_release(state["storage_error"], time.monotonic())
+                        state["decision"].update(decision)
+                        publish_request(decision, time.monotonic())
+                        if memory is not None:
+                            memory.publish(state["controller"])
+                    else:
+                        protect(state["storage_error"])
             finally:
                 state["queue"].task_done()
 
@@ -1221,7 +1766,8 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     readback_episode.accept(state["fan"], time.monotonic(), state["decision"]["level"], eligible=eligible,
                         anchor=state["controller"].communication_anchor if high_wind_gate else None)
                 if not fan_healthy() and readback_hold(time.monotonic()) is None:
-                    protect("风机反馈中断，重新建立保护风力基线")
+                    async with admission.publication():
+                        protect("风机反馈中断，重新建立保护风力基线")
                 try:
                     if state["device"] is None and token_path.exists():
                         state["device"] = await asyncio.to_thread(device_from_token, token_path.read_text().strip())
@@ -1232,7 +1778,9 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                             state["device"] = device = await asyncio.to_thread(
                                 device_from_token, token_path.read_text().strip())
                             state["last_identity"] = time.monotonic()
-                        state["fan"] = await apply_fan(device)
+                        fan_result = await apply_fan(device)
+                        async with admission.publication():
+                            state['fan'] = fan_result
                         readback_episode.accept(state["fan"], time.monotonic(), state["decision"]["level"],
                             eligible=eligible and not schedule.fault and schedule.attempts == 0
                             and schedule.expected_level is None and not schedule.persistence_error,
@@ -1242,17 +1790,20 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                                 state["controller"]._policy["operation"]["episode"].original_from
                                 if state["controller"]._pending() else 0))
                         if state["fan"].get("protection_interrupted"):
-                            protect("执行期间触发保护，读回恢复后仍需重新建立安全基线")
+                            async with admission.publication():
+                                protect("执行期间触发保护，读回恢复后仍需重新建立安全基线")
                 except Exception:
-                    readback_episode.published = ReadbackAssessment()
-                    state["device"] = None
-                    state["fan"] = {"configured": token_path.exists(), "confirmed": False,
-                                    "level": None, "rpm": None, "fault": state["motor_schedule"].fault,
-                                    "attempts": state["motor_schedule"].attempts,
-                                    "error": state["motor_schedule"].persistence_error or "净化器连接、身份验证或读回检查未完成，保护风力请求尚未匹配确认"}
+                    async with admission.publication():
+                        readback_episode.published = ReadbackAssessment()
+                        state["device"] = None
+                        state["fan"] = {"configured": token_path.exists(), "confirmed": False,
+                                        "level": None, "rpm": None, "fault": state["motor_schedule"].fault,
+                                        "attempts": state["motor_schedule"].attempts,
+                                        "error": state["motor_schedule"].persistence_error or "净化器连接、身份验证或读回检查未完成，保护风力请求尚未匹配确认"}
                 state["last_fan"] = time.monotonic()
                 if not fan_healthy() and readback_hold(time.monotonic()) is None:
-                    protect()
+                    async with admission.publication():
+                        protect()
             await asyncio.sleep(3)
 
     async def watchdog():
@@ -1264,17 +1815,20 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             await asyncio.sleep(2)
 
     async def startup(application):
+        if memory is not None:
+            memory.publish(state["controller"])
         state["tasks"] = [asyncio.create_task(task()) for task in (monitor, storage, fan, watchdog)]
 
     async def apply_fan(device):
         def execute():
             interrupted = False
-            def target():
+            def target(reservation=None):
                 nonlocal interrupted
-                request = request_snapshot()
+                request = request_snapshot(reservation)
                 interrupted = interrupted or request.protected
                 return request
-            result = fan_apply(device, target, state["motor_schedule"], high_wind_gate=high_wind_gate)
+            result = fan_apply(device, target, state["motor_schedule"], high_wind_gate=high_wind_gate,
+                admission=admission)
             result["protection_interrupted"] = result.get("protection_interrupted", False) or interrupted
             return result
         schedule = state["motor_schedule"]
@@ -1292,7 +1846,8 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
             readback_episode.active_recovery = None
 
     async def shutdown():
-        state["force_max"], state["stop"] = True, True
+        async with admission.publication():
+            state["force_max"], state["stop"] = True, True
         await state["qr"].close()
         if state["settings_task"] is not None:
             try:
@@ -1306,11 +1861,18 @@ async def create_app(root, origins=None, *, learning_enabled=False, high_wind_ga
                     await asyncio.wait_for(apply_fan(state["device"]), timeout=10)
         except Exception:
             pass
+        remaining = [task for task in state.get("tasks", []) if not task.done()]
+        for task in remaining:
+            task.cancel()
+        if remaining:
+            await asyncio.gather(*remaining, return_exceptions=True)
         if learning_enabled:
             try:
                 state["learning"] = await disk_call(learning_checkpoint, dict(state["settings"]), time.time())
             except Exception:
                 state["learning"] = dict(state["learning"], error="学习检查点保存失败，固定保护继续生效")
+        if memory is not None:
+            await drain_owned(memory.flush(state["controller"]))
         state["disk"].shutdown(wait=False, cancel_futures=True)
         state["history_disk"].shutdown(wait=False, cancel_futures=True)
 
@@ -1347,7 +1909,7 @@ def main():
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(args.state / "tls.crt", args.state / "tls.key")
-    web.run_app(create_app(args.state, origins), host="127.0.0.1" if args.plain_loopback else "0.0.0.0",
+    web.run_app(create_app(args.state, origins, high_wind_gate=True), host="127.0.0.1" if args.plain_loopback else "0.0.0.0",
                 port=8910, ssl_context=context, access_log=None, print=None)
 
 
